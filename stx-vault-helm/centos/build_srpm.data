@@ -1,0 +1,14 @@
+SRC_DIR="stx-vault-helm"
+
+TAR_NAME=helm-charts-vault-0-6-0
+VERSION=1.0.0
+TAR="$TAR_NAME.tar.gz"
+
+COPY_LIST="${CGCS_BASE}/downloads/$TAR $PKG_BASE/$SRC_DIR/files/* $PKG_BASE/$SRC_DIR/manifests/*"
+
+TIS_PATCH_VER=0
+
+# Keep the SRCREV in sync with python-k8sapp-cert-manager so the app version is
+# the same as the plugin version
+#TIS_BASE_SRCREV=94d4c26f982e2e8c222517900c504580d1e3a09d
+#TIS_PATCH_VER=GITREVCOUNT

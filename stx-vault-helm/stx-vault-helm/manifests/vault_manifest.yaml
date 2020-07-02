@@ -1,0 +1,72 @@
+---
+schema: armada/Chart/v1
+metadata:
+  schema: metadata/Document/v1
+  name: vault
+data:
+  chart_name: vault
+  release: vault
+  namespace: vault
+  wait:
+    timeout: 1800
+    labels:
+      app: vault
+  install:
+    no_hooks: false
+  upgrade:
+    no_hooks: false
+    pre:
+      delete:
+        - type: job
+          labels:
+            app: vault
+  values:
+    global:
+      enabled: true
+    injector:
+      enabled: true
+      image:
+        repository: hashicorp/vault-k8s
+        tag: 0.4.0
+      agentImage:
+        repository: vault
+        tag: 1.4.2
+    server:
+      image:
+        repository: vault
+        tag: 1.4.2
+      auditStorage:
+        enabled: true
+        size: 10Gi
+      ha:
+        enabled: true
+        replicas: 3
+        raft:
+          enabled: true
+      extraLabels:
+        app: vault
+  source:
+    type: tar
+    location: http://172.17.0.1/helm_charts/stx-platform/vault-0.6.0.tgz
+    subpath: vault
+    reference: master
+  dependencies: []
+---
+schema: armada/ChartGroup/v1
+metadata:
+  schema: metadata/Document/v1
+  name: vault
+data:
+  description: "Deploy Vault"
+  sequenced: false
+  chart_group:
+    - vault
+---
+schema: armada/Manifest/v1
+metadata:
+  schema: metadata/Document/v1
+  name: vault-manifest
+data:
+  release_prefix: stx
+  chart_groups:
+    - vault
