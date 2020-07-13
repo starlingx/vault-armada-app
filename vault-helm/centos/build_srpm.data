@@ -1,13 +1,10 @@
-SRC_DIR="stx-vault-helm"
+SRC_DIR="vault-helm"
 
 TAR_NAME=helm-charts-vault-0-6-0
 VERSION=1.0.0
 TAR="$TAR_NAME.tar.gz"
 
-COPY_LIST_TO_TAR="\
-    $STX_BASE/helm-charts/psp-rolebinding/psp-rolebinding/helm-charts \
-"
-#COPY_LIST="${CGCS_BASE}/downloads/$TAR $PKG_BASE/$SRC_DIR/files/* $PKG_BASE/$SRC_DIR/manifests/* $PKG_BASE/$SRC_DIR/helm-charts/*"
+COPY_LIST="${CGCS_BASE}/downloads/$TAR $PKG_BASE/$SRC_DIR/files/* $PKG_BASE/$SRC_DIR/manifests/* $PKG_BASE/$SRC_DIR/helm-charts/*"
 
 TIS_PATCH_VER=0
 

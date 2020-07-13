@@ -12,7 +12,7 @@
 %global toolkit_version 0.1.0
 
 Summary: StarlingX Vault Armada Helm Charts
-Name: stx-vault-helm
+Name: vault-helm
 Version: 1.0
 Release: %{tis_patch_ver}%{?_tis_dist}
 License: Apache-2.0
@@ -21,28 +21,24 @@ Packager: Wind River <info@windriver.com>
 URL: unknown
 
 Source0: helm-charts-vault-0-6-0.tar.gz
-#Source1: repositories.yaml
-#Source2: index.yaml
-#Source3: Makefile
-#Source4: metadata.yaml
-#Source5: vault_manifest.yaml
-#Source6: vault-init.yaml
-#Source7: vault-certificates.yaml
-#Source8: _helpers-CA.tpl
+Source1: repositories.yaml
+Source2: index.yaml
+Source3: Makefile
+Source4: metadata.yaml
+Source5: vault_manifest.yaml
+Source6: vault-init.yaml
+Source7: vault-certificates.yaml
+Source8: _helpers-CA.tpl
 
 BuildArch: noarch
 
 BuildRequires: helm
-BuildRequires: vault-helm
-BuildRequires: python-k8sapp-vault
-BuildRequires: python-k8sapp-vault-wheels
-Requires: vault-helm
 
 %description
 StarlingX Vault Helm Charts
 
 %prep
-%setup -n helm-charts-vault-0-6-0-1.0.0
+%setup -n helm-charts-vault
 
 %build
 # initialize helm and build the toolkit
@@ -59,10 +55,10 @@ mkdir  %{helm_home}/cache
 mkdir  %{helm_home}/cache/archive
 
 # Stage a repository file that only has a local repo
-cp files/repositories.yaml %{helm_home}/repository/repositories.yaml
+cp %{SOURCE1} %{helm_home}/repository/repositories.yaml
 
 # Stage a local repo index that can be updated by the build
-cp files/index.yaml %{helm_home}/repository/local/index.yaml
+cp %{SOURCE2} %{helm_home}/repository/local/index.yaml
 
 # Host a server for the charts
 helm serve --repo-path . &
@@ -70,56 +66,56 @@ helm repo rm local
 helm repo add local http://localhost:8879/charts
 
 # Create the tgz file
-#cp %{SOURCE3} ./
-#mkdir ./vault
-#cp ./Chart.yaml ./vault
-#mv ./values.yaml ./vault
-#cp %{SOURCE6} ./templates
-#cp %{SOURCE7} ./templates
-#cat %{SOURCE8} >> ./templates/_helpers.tpl
-#mv ./templates ./vault/templates
+cp %{SOURCE3} ./
+mkdir ./vault
+cp ./Chart.yaml ./vault
+mv ./values.yaml ./vault
+cp %{SOURCE6} ./templates
+cp %{SOURCE7} ./templates
+cat %{SOURCE8} >> ./templates/_helpers.tpl
+mv ./templates ./vault/templates
 
-cd helm-charts
-make psp-rolebinding
+make vault
 cd -
 
 # Terminate helm server (the last backgrounded task)
 kill %1
 
 # Create a chart tarball compliant with sysinv kube-app.py
-%define app_staging %{_builddir}/staging
-%define app_tarball %{app_name}-%{version}-%{tis_patch_ver}.tgz
+#%define app_staging %{_builddir}/staging
+#%define app_tarball %{app_name}-%{version}-%{tis_patch_ver}.tgz
 
 # Setup staging
 mkdir -p %{app_staging}
-cp files/metadata.yaml %{app_staging}
-cp manifests/*.yaml %{app_staging}
+cp %{SOURCE4} %{app_staging}
+cp %{SOURCE5} %{app_staging}
 mkdir -p %{app_staging}/charts
-cp helm-charts/*.tgz %{app_staging}/charts
-cp %{helm_folder}/vault*.tgz %{app_staging}/charts
+cp ./helm-charts-vault/*.tgz %{app_staging}/charts
 cd %{app_staging}
 
 # Populate metadata
-sed -i 's/@APP_NAME@/%{app_name}/g' %{app_staging}/metadata.yaml
-sed -i 's/@APP_VERSION@/%{version}-%{tis_patch_ver}/g' %{app_staging}/metadata.yaml
-sed -i 's/@HELM_REPO@/%{helm_repo}/g' %{app_staging}/metadata.yaml
+#sed -i 's/@APP_NAME@/%{app_name}/g' %{app_staging}/metadata.yaml
+#sed -i 's/@APP_VERSION@/%{version}-%{tis_patch_ver}/g' %{app_staging}/metadata.yaml
+#sed -i 's/@HELM_REPO@/%{helm_repo}/g' %{app_staging}/metadata.yaml
 
 
 # Copy the plugins: installed in the buildroot
-mkdir -p %{app_staging}/plugins
-cp /plugins/%{app_name}/*.whl %{app_staging}/plugins
+#mkdir -p %{app_staging}/plugins
+#cp /plugins/%{app_name}/*.whl %{app_staging}/plugins
 
 # package it up
 find . -type f ! -name '*.md5' -print0 | xargs -0 md5sum > checksum.md5
 tar -zcf %{_builddir}/%{app_tarball} -C %{app_staging}/ .
 
 # Cleanup staging
-rm -fr %{app_staging}
+#rm -fr %{app_staging}
+
 
 %install
-install -d -m 755 %{buildroot}/%{app_folder}
-install -p -D -m 755 %{_builddir}/%{app_tarball} %{buildroot}/%{app_folder}
+install -d -m 755 ${RPM_BUILD_ROOT}%{helm_folder}
+install -p -D -m 755 %{app_staging}/charts/*.tgz ${RPM_BUILD_ROOT}%{helm_folder}
+
 
 %files
 %defattr(-,root,root,-)
-%{app_folder}/*
+%{helm_folder}/*
