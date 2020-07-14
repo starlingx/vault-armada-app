@@ -1,3 +1,8 @@
+{{ $ca := genCA "svc-cat-ca" 3650 }}
+{{ $cn := printf "fluentd.%s.svc.cluster.local" .Release.Namespace }}
+{{ $server := genSignedCert $cn nil nil 365 $ca }}
+{{ $client := genSignedCert "" nil nil 365 $ca }}
+
 apiVersion: v1
 kind: Secret
 type: kubernetes.io/tls
@@ -13,7 +18,8 @@ metadata:
     "helm.sh/hook": "pre-install"
     "helm.sh/hook-delete-policy": "before-hook-creation"
 data:
-{{ ( include "vault.gen-certs" . ) | indent 2 }}
+  tls.crt: {{ b64enc $ca.Cert }}
+  tls.key: {{ b64enc $ca.Key }}
 ---
 apiVersion: cert-manager.io/v1alpha2
 kind: Issuer

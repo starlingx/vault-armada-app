@@ -82,6 +82,7 @@ data:
 
         echo "Initializing the vault on vault-0 and storing keys in $WORKDIR/cluster_keys.json"
         initVault
+        cp $WORKDIR/cluster_keys.json $WORKDIR/cluster_init.json
         sleep 10 #Some sleep required to allow convergence"
 
         echo ""
@@ -139,23 +140,10 @@ metadata:
   name: vault-init-unseal
   namespace: {{ .Release.Namespace }}
 ---
-kind: PersistentVolumeClaim
-apiVersion: v1
-metadata:
-    name: manager-pvc
-    namespace: {{ .Release.Namespace }}
-spec:
-    accessModes:
-      - ReadWriteOnce
-    storageClassName: general
-    resources:
-        requests:
-            storage: 1Gi
----
 {{- if and (eq (.Values.injector.enabled | toString) "true" ) (eq (.Values.global.enabled | toString) "true") }}
 # Deployment for the unsealer
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ template "vault.fullname" . }}-manager
   namespace: {{ .Release.Namespace }}
@@ -204,12 +192,18 @@ spec:
         - name: vault-init-unseal
           configMap:
             name: vault-init-unseal
-        - name: manager-pvc 
-          persistentVolumeClaim:
-            claimName: manager-pvc
         - name: vault-ca
           secret:
             secretName: vault-ca
+  volumeClaimTemplates:
+    - metadata:
+        name: manager-pvc
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
       {{- if .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.global.imagePullSecrets | nindent 8 }}

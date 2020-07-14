@@ -25,10 +25,9 @@ Source1: repositories.yaml
 Source2: index.yaml
 Source3: Makefile
 Source4: metadata.yaml
-Source5: vault_manifest.yaml
-Source6: vault-init.yaml
-Source7: vault-certificates.yaml
-Source8: _helpers-CA.tpl
+Source5: vault-init.yaml
+Source6: vault-certificates.yaml
+Source7: _helpers-CA.tpl
 
 BuildArch: noarch
 
@@ -70,9 +69,9 @@ cp %{SOURCE3} ./
 mkdir ./vault
 cp ./Chart.yaml ./vault
 mv ./values.yaml ./vault
+cp %{SOURCE5} ./templates
 cp %{SOURCE6} ./templates
-cp %{SOURCE7} ./templates
-cat %{SOURCE8} >> ./templates/_helpers.tpl
+cat %{SOURCE7} >> ./templates/_helpers.tpl
 mv ./templates ./vault/templates
 
 make vault
@@ -88,20 +87,9 @@ kill %1
 # Setup staging
 mkdir -p %{app_staging}
 cp %{SOURCE4} %{app_staging}
-cp %{SOURCE5} %{app_staging}
 mkdir -p %{app_staging}/charts
 cp ./helm-charts-vault/*.tgz %{app_staging}/charts
 cd %{app_staging}
-
-# Populate metadata
-#sed -i 's/@APP_NAME@/%{app_name}/g' %{app_staging}/metadata.yaml
-#sed -i 's/@APP_VERSION@/%{version}-%{tis_patch_ver}/g' %{app_staging}/metadata.yaml
-#sed -i 's/@HELM_REPO@/%{helm_repo}/g' %{app_staging}/metadata.yaml
-
-
-# Copy the plugins: installed in the buildroot
-#mkdir -p %{app_staging}/plugins
-#cp /plugins/%{app_name}/*.whl %{app_staging}/plugins
 
 # package it up
 find . -type f ! -name '*.md5' -print0 | xargs -0 md5sum > checksum.md5

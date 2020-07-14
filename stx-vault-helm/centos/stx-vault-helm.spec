@@ -21,14 +21,6 @@ Packager: Wind River <info@windriver.com>
 URL: unknown
 
 Source0: helm-charts-vault-0-6-0.tar.gz
-#Source1: repositories.yaml
-#Source2: index.yaml
-#Source3: Makefile
-#Source4: metadata.yaml
-#Source5: vault_manifest.yaml
-#Source6: vault-init.yaml
-#Source7: vault-certificates.yaml
-#Source8: _helpers-CA.tpl
 
 BuildArch: noarch
 
@@ -68,16 +60,6 @@ cp files/index.yaml %{helm_home}/repository/local/index.yaml
 helm serve --repo-path . &
 helm repo rm local
 helm repo add local http://localhost:8879/charts
-
-# Create the tgz file
-#cp %{SOURCE3} ./
-#mkdir ./vault
-#cp ./Chart.yaml ./vault
-#mv ./values.yaml ./vault
-#cp %{SOURCE6} ./templates
-#cp %{SOURCE7} ./templates
-#cat %{SOURCE8} >> ./templates/_helpers.tpl
-#mv ./templates ./vault/templates
 
 cd helm-charts
 make psp-rolebinding
