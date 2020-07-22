@@ -56,6 +56,8 @@ data:
       tlsDisable: false
     injector:
       enabled: true
+      nodeSelector: |
+        node-role.kubernetes.io/master: ""
       image:
         repository: hashicorp/vault-k8s
         tag: 0.4.0
@@ -63,6 +65,15 @@ data:
         repository: vault
         tag: 1.4.2
     server:
+      affinity: |
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {{ template "vault.name" . }}
+                  app.kubernetes.io/instance: "{{ .Release.Name }}"
+                  component: server
+              topologyKey: kubernetes.io/hostname
       image:
         repository: vault
         tag: 1.4.2

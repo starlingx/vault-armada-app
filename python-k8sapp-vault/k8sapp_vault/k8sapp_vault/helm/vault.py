@@ -30,18 +30,33 @@ class VaultHelm(base.BaseHelm):
     def get_namespaces(self):
         return self.SUPPORTED_NAMESPACES
 
+    def get_master_worker_host_count(self):
+        controller=len(self.dbapi.ihost_get_by_personality(constants.CONTROLLER))
+        worker=len(self.dbapi.ihost_get_by_personality(constants.WORKER))
+        return controller+worker
+
+
     def get_overrides(self, namespace=None):
-
-        overrides = {
-            common.HELM_NS_VAULT: {
-                'server': {
-                    'ha': {
-                        'replicas': max(1, self._num_provisioned_controllers()),
-                    },
-                },
-            }
-        }
-
+        if self.get_master_worker_host_count() >= 3:
+            overrides = {
+                common.HELM_NS_VAULT: {
+                    'server': {
+                        'ha': {
+                            'replicas': 3,
+                        },
+                     },
+                 }
+             }
+        else:
+            overrides = {
+                common.HELM_NS_VAULT: {
+                    'server': {
+                        'ha': {
+                            'replicas': 1,
+                        },
+                     },
+                 }
+             }
         if namespace in self.SUPPORTED_NAMESPACES:
             return overrides[namespace]
         elif namespace:
