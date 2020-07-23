@@ -58,7 +58,7 @@ data:
 
     # Simply calls the status check of a vault, used to check if it is initialized, unsealed, or part of raft cluster
     function vaultServerStatus {
-        curl --cacert $CERT -s https://$row.$DOMAIN:8200/v1/sys/health | jq
+        curl --cacert $CERT -s https://$row.$DOMAIN:8200/v1/sys/health
     }
 
 
@@ -168,7 +168,7 @@ spec:
       serviceAccountName: "{{ template "vault.fullname" . }}"
       containers:
         - name: manager
-          image: cwalops/k8
+          image: starlingx/stx-vault-manager:stx.5.0-v1.18.3
           imagePullPolicy: "{{ .Values.injector.image.pullPolicy }}"
           args:
             - bash
