@@ -7,4 +7,4 @@
 # Helm: Supported charts:
 # These values match the names in the chart package's Chart.yaml
 HELM_CHART_VAULT = 'vault'
-HELM_CHART_PSP_ROLEBINDING = 'psp-rolebinding'
+HELM_CHART_PSP_ROLEBINDING = 'vault-psp-rolebinding'

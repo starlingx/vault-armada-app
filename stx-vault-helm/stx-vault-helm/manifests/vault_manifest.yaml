@@ -4,7 +4,7 @@ metadata:
   schema: metadata/Document/v1
   name: vault-psp-rolebinding
 data:
-  chart_name: psp-rolebinding
+  chart_name: vault-psp-rolebinding
   release: vault-psp-rolebinding
   namespace: vault
   values:
