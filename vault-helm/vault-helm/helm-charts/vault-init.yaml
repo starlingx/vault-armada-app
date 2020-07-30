@@ -11,10 +11,10 @@ data:
     # FUNCTIONS
 
     # Creates a list of all k8s vault pods and stores in text file.
-    # Converts ips from X.X.X.X to X-X-X-X for use as pod dns names
+    # Converts ips from X.X.X.X or a:b:c::d to X-X-X-X for use as pod dns names
     function getVaultPods {
         kubectl get pods -n {{ .Release.Namespace }} -l component=server,app.kubernetes.io/name=vault -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\n"}{end}' > $WORKDIR/pods.txt
-        sed -i 's/\./-/g' $WORKDIR/pods.txt
+        sed -i 's/\.\|:/-/g' $WORKDIR/pods.txt
     }
 
     # Wait for the vault servers in the stateful set to be created before initializing
