@@ -6,6 +6,7 @@ data:
     CERT=$CA_CERT # Get the CA path from environment vars
     CA_ONELINE=$(awk '{printf "%s\\n", $0}' $CERT) # Store cert as a oneliner for curl purposes
     DOMAIN={{ .Release.Namespace }}.pod.cluster.local # Set the domain for resolving pod names
+    SVCDOMAIN={{ .Release.Namespace }}.svc.cluster.local
     WORKDIR=$PVCDIR # PVC location so that keys can be persisted
 
     # FUNCTIONS
@@ -13,23 +14,34 @@ data:
     # Creates a list of all k8s vault pods and stores in text file.
     # Converts ips from X.X.X.X or a:b:c::d to X-X-X-X for use as pod dns names
     function getVaultPods {
-        kubectl get pods -n {{ .Release.Namespace }} -l component=server,app.kubernetes.io/name=vault -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\n"}{end}' > $WORKDIR/pods.txt
+        kubectl get pods \
+        -n {{ .Release.Namespace }} \
+        -l component=server,app.kubernetes.io/name=vault \
+        -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\n"}{end}' \
+        > $WORKDIR/pods.txt
+
         sed -i 's/\.\|:/-/g' $WORKDIR/pods.txt
     }
 
     # Wait for the vault servers in the stateful set to be created before initializing
     function waitForPods {
-        CURRENT_PODS=$(kubectl get pods -l component=server,app.kubernetes.io/name=vault \
-                     -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
-                     {end}' | grep Running | wc -l)
+        CURRENT_PODS=$(kubectl get pods \
+                    -l component=server,app.kubernetes.io/name=vault \
+                    -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
+                    {end}' \
+                    | grep Running \
+                    | wc -l)
         DESIRED_PODS={{ .Values.server.ha.replicas }}
 
         while [ $CURRENT_PODS != $DESIRED_PODS ]; do
             sleep 5
             echo "Waiting for {{ template "vault.fullname" . }} statefulset running pods ($CURRENT_PODS) to equal desired pods ($DESIRED_PODS)"
-            CURRENT_PODS=$(kubectl get pods -l component=server,app.kubernetes.io/name=vault \
-                         -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
-                         {end}' | grep Running | wc -l)
+            CURRENT_PODS=$(kubectl get pods \
+                        -l component=server,app.kubernetes.io/name=vault \
+                        -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
+                        {end}' \
+                        | grep Running \
+                        | wc -l)
         done
     }
 
@@ -38,7 +50,12 @@ data:
     function initVault {
         V0=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
         echo "Initializing $V0"
-        curl -s --cacert $CERT --request POST --data  '{"secret_shares": 5, "secret_threshold": 3}' https://$V0.$DOMAIN:8200/v1/sys/init > $WORKDIR/cluster_keys.json
+        curl -s \
+        --cacert $CERT \
+        --request POST \
+        --data  '{"secret_shares": 5, "secret_threshold": 3}' \
+        https://$V0.$DOMAIN:8200/v1/sys/init \
+        > $WORKDIR/cluster_keys.json
     }
 
     # Uses the master key shards in cluster_keys.json to unseal vault
@@ -53,7 +70,19 @@ data:
     function joinRaft {
        CLUSTER_LEAD=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
        ROOT_TOKEN=$(cat $WORKDIR/cluster_keys.json | jq -r .root_token)
-       curl -s --cacert $CERT -H "X-Vault-Token: $ROOT_TOKEN" --request POST --data "{\"leader_api_addr\": \"https://$CLUSTER_LEAD.$DOMAIN:8200\", \"leader_ca_cert\": \"$CA_ONELINE\"}" https://$row.$DOMAIN:8200/v1/sys/storage/raft/join
+       RAFT_STATUS=""
+       while [ "$RAFT_STATUS" != "true" ]; do
+           RAFT_STATUS=$(curl -s \
+                      --cacert $CERT \
+                      -H "X-Vault-Token: $ROOT_TOKEN" \
+                      --request POST \
+                      --data "{\"leader_api_addr\": \"https://sva-{{ template "vault.name" .}}-active.$SVCDOMAIN:8200\", \"leader_ca_cert\": \"$CA_ONELINE\"}" \
+                      https://$row.$DOMAIN:8200/v1/sys/storage/raft/join)
+
+           echo "$row $RAFT_STATUS"
+           RAFT_STATUS=$(echo $RAFT_STATUS | jq -r .joined)
+           sleep 1
+       done
     }
 
     # Simply calls the status check of a vault, used to check if it is initialized, unsealed, or part of raft cluster
