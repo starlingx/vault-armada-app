@@ -29,7 +29,6 @@ BuildRequires: chartmuseum
 BuildRequires: vault-helm
 BuildRequires: python-k8sapp-vault
 BuildRequires: python-k8sapp-vault-wheels
-Requires: vault-helm
 
 %description
 StarlingX Vault Helm Charts
