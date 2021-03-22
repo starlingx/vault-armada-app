@@ -54,6 +54,8 @@ data:
     global:
       enabled: true
       tlsDisable: false
+      imagePullSecrets:
+        - name: default-registry-key
     injector:
       enabled: true
       nodeSelector: |

@@ -31,8 +31,6 @@ Source7: _helpers-CA.tpl
 
 BuildArch: noarch
 
-Patch01: 0001-add-image-pull-secrets-to-image.patch
-
 BuildRequires: helm
 BuildRequires: chartmuseum
 
@@ -41,7 +39,6 @@ StarlingX Vault Helm Charts
 
 %prep
 %setup -n helm-charts-vault
-%patch01 -p1
 
 %build
 chartmuseum --debug --port=8879 --context-path='/charts' --storage="local" --storage-local-rootdir="." &

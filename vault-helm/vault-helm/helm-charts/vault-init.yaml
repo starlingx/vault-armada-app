@@ -195,6 +195,10 @@ spec:
         component: webhook
     spec:
       serviceAccountName: "{{ template "vault.fullname" . }}"
+      {{- if .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.global.imagePullSecrets | nindent 8 }}
+      {{- end }}
       containers:
         - name: manager
           image: starlingx/stx-vault-manager:stx.5.0-v1.18.3
@@ -233,8 +237,4 @@ spec:
         resources:
           requests:
             storage: 1Gi
-      {{- if .Values.global.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml .Values.global.imagePullSecrets | nindent 8 }}
-      {{- end }}
 {{ end }}
