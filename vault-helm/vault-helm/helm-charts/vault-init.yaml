@@ -201,7 +201,7 @@ spec:
       {{- end }}
       containers:
         - name: manager
-          image: starlingx/stx-vault-manager:stx.5.0-v1.18.3
+          image: "{{ .Values.manager.image.repository }}:{{ .Values.manager.image.tag }}"
           imagePullPolicy: "{{ .Values.injector.image.pullPolicy }}"
           args:
             - bash
