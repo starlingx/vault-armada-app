@@ -3,13 +3,32 @@
     check:
       jobs:
         - openstack-tox-linters
+        - k8app-vault-tox-py39
     gate:
       jobs:
         - openstack-tox-linters
+        - k8app-vault-tox-py39
     post:
       jobs:
         - stx-vault-armada-app-upload-git-mirror
 
+- job:
+    name: k8app-vault-tox-py39
+    parent: tox-py39
+    description: |
+        Run py39 for vault armada app
+    nodeset: debian-bullseye
+    required-projects:
+      - starlingx/config
+      - starlingx/fault
+      - starlingx/update
+      - starlingx/utilities
+    files:
+      - python-k8sapp-vault/*
+    vars:
+        tox_envlist: py39
+        python_version: 3.9
+        tox_extra_args: -c python-k8sapp-vault/k8sapp_vault/tox.ini
 - job:
     name: stx-vault-armada-app-upload-git-mirror
     parent: upload-git-mirror

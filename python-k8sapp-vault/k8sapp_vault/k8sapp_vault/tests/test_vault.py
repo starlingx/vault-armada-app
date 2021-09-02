@@ -31,8 +31,7 @@ class VaultIPv4ControllerHostTestCase(VaultTestCase,
             cnamespace=common.HELM_NS_VAULT)
 
         self.assertOverridesParameters(overrides, {
-            # 1 replica for 1 controller
-            'replicaCount': 1
+            'server': {'ha': {'replicas': 1}}
         })
 
 
@@ -46,6 +45,5 @@ class VaultIPv6AIODuplexSystemTestCase(VaultTestCase,
             cnamespace=common.HELM_NS_VAULT)
 
         self.assertOverridesParameters(overrides, {
-            # 2 replicas for 2 controllers
-            'replicaCount': 2
+            'server': {'ha': {'replicas': 1}}
         })
