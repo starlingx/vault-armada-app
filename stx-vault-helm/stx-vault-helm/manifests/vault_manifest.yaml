@@ -60,6 +60,10 @@ data:
       image:
         repository: starlingx/stx-vault-manager
         tag: stx.5.0-v1.18.3
+      tolerations: |
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
     injector:
       enabled: true
       nodeSelector: |
@@ -70,6 +74,10 @@ data:
       agentImage:
         repository: vault
         tag: 1.4.2
+      tolerations: |
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
     server:
       affinity: |
         podAntiAffinity:
@@ -83,6 +91,10 @@ data:
       image:
         repository: vault
         tag: 1.4.2
+      tolerations: |
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
       auditStorage:
         enabled: true
         size: 10Gi
