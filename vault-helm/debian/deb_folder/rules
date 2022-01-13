@@ -6,34 +6,30 @@ export APP_FOLDER = $(ROOT)/usr/lib/helm
 
 export APP_TARBALL = vault-0.6.0.tgz
 export STAGING = staging
-export VAULT_CHART_DIR = helm-charts-vault
 
 %:
 	dh $@
 
 override_dh_auto_build:
-	# Apply patches.
-	patch -d $(VAULT_CHART_DIR) -p1 < 0001-Add-vault-manager-repository-to-values.yaml.patch
 	# Host a server for the helm charts.
 	chartmuseum --debug --port=8879 --context-path='/charts' --storage="local" \
 		--storage-local-rootdir="." &
 	sleep 2
 	helm repo add local http://localhost:8879/charts
 	# Set up chart build files.
-	cp Makefile $(VAULT_CHART_DIR)
-	mkdir $(VAULT_CHART_DIR)/vault
-	cd $(VAULT_CHART_DIR) && cp Chart.yaml values.yaml vault
-	cp vault-init.yaml vault-certificates.yaml $(VAULT_CHART_DIR)/templates
-	cat _helpers-CA.tpl >> $(VAULT_CHART_DIR)/templates/_helpers.tpl
-	cd $(VAULT_CHART_DIR) && mv templates vault/templates
+	mkdir vault
+	cp Chart.yaml values.yaml vault
+	cp vault-init.yaml vault-certificates.yaml templates
+	cat _helpers-CA.tpl >> templates/_helpers.tpl
+	mv templates vault/templates
 	# Create the TGZ file.
-	cd $(VAULT_CHART_DIR) && make vault
+	make vault
 	# Terminate the helm chart server.
 	pkill chartmuseum
 
 override_dh_auto_install:
 	# Install the app tar file.
 	install -d -m 755 $(APP_FOLDER)
-	install -p -D -m 755 $(VAULT_CHART_DIR)/$(APP_TARBALL) $(APP_FOLDER)
+	install -p -D -m 755 $(APP_TARBALL) $(APP_FOLDER)
 
 override_dh_auto_test:

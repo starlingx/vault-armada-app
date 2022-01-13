@@ -1,7 +1,18 @@
 ---
 debname: vault-helm
 debver: 1.0-1
-dl_hook: dl_hook
+dl_path:
+  name: helm-charts-vault-0-6-0.tar.gz
+  url: https://github.com/hashicorp/vault-helm/archive/v0.6.0.tar.gz
+  md5sum: 534a999a2c31cd04e58632bacce3f589
+src_files:
+  - vault-helm/files/index.yaml
+  - vault-helm/files/Makefile
+  - vault-helm/files/metadata.yaml
+  - vault-helm/files/repositories.yaml
+  - vault-helm/helm-charts/_helpers-CA.tpl
+  - vault-helm/helm-charts/vault-certificates.yaml
+  - vault-helm/helm-charts/vault-init.yaml
 revision:
   dist: $STX_DIST
   PKG_GITREVCOUNT: true
