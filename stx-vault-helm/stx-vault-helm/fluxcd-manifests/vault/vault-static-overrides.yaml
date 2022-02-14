@@ -1,0 +1,82 @@
+#
+# Copyright (c) 2022 Wind River Systems, Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+global:
+  enabled: true
+  tlsDisable: false
+  imagePullSecrets:
+    - name: default-registry-key
+manager:
+  image:
+    repository: starlingx/stx-vault-manager
+    tag: stx.5.0-v1.18.3
+  tolerations: |
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+injector:
+  enabled: true
+  nodeSelector: |
+    node-role.kubernetes.io/master: ""
+  image:
+    repository: hashicorp/vault-k8s
+    tag: 0.4.0
+  agentImage:
+    repository: vault
+    tag: 1.4.2
+  tolerations: |
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+server:
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ template "vault.name" . }}
+              app.kubernetes.io/instance: "{{ .Release.Name }}"
+              component: server
+          topologyKey: kubernetes.io/hostname
+  image:
+    repository: vault
+    tag: 1.4.2
+  tolerations: |
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+  auditStorage:
+    enabled: true
+    size: 10Gi
+  ha:
+    enabled: true
+    replicas: 3
+    raft:
+      enabled: true
+      config: |
+        ui = true
+
+        listener "tcp" {
+          tls_disable = 0
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+          tls_cert_file = "/vault/userconfig/vault-server-tls/tls.crt"
+          tls_key_file  = "/vault/userconfig/vault-server-tls/tls.key"
+          tls_client_ca_file = "/vault/userconfig/vault-server-tls/ca.crt"
+        }
+
+        storage "raft" {
+          path = "/vault/data"
+        }
+
+        service_registration "kubernetes" {}
+  extraLabels:
+    app: vault
+  extraEnvironmentVars:
+    VAULT_CACERT: /vault/userconfig/vault-server-tls/ca.crt
+  extraVolumes:
+    - type: secret
+      name: vault-server-tls

@@ -182,6 +182,7 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
     component: webhook
 spec:
+  serviceName: {{ template "vault.fullname" . }}
   replicas: 1
   selector:
     matchLabels:
