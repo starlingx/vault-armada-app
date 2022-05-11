@@ -1,2 +1,2 @@
 stx-vault-helm
-stx-vault-helm-fluxcd
+stx-vault-helm-armada
