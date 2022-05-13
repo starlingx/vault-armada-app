@@ -21,34 +21,31 @@ data:
   tls.crt: {{ b64enc $ca.Cert }}
   tls.key: {{ b64enc $ca.Key }}
 ---
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
+  creationTimestamp: null
   name: ca-issuer
   namespace: {{ .Release.Namespace }}
 spec:
   ca:
     secretName: {{ template "vault.name" . }}-ca
+status: {}
 ---
-apiVersion: cert-manager.io/v1alpha2
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
+  creationTimestamp: null
   name: vault-server-tls
   namespace: {{ .Release.Namespace }}
 spec:
   # Secret names are always required.
   secretName: vault-server-tls
-  duration: 2160h # 90d
-  renewBefore: 360h # 15d
-  organization:
-  - stx
-  isCA: false
-  keySize: 2048
-  keyAlgorithm: rsa
-  keyEncoding: pkcs1
+  duration: 2160h0m0s  # 90d
+  renewBefore: 360h0m0s  # 15d
   usages:
-    - server auth
-    - client auth
+  - server auth
+  - client auth
   # At least one of a DNS Name, URI, or IP address is required.
   dnsNames:
   - sva-{{ template "vault.name" . }}
@@ -69,3 +66,11 @@ spec:
     # This is optional since cert-manager will default to this value however
     # if you are using an external issuer, change this to that issuer group.
     group: cert-manager.io
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+  subject:
+    organizations:
+    - stx
+status: {}
