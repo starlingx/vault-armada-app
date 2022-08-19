@@ -16,5 +16,5 @@ Package: stx-vault-helm
 Section: libs
 Architecture: any
 Depends: ${misc:Depends}
-Description: StarlingX Vault Armada Helm Charts
- This package contains Armada helm charts for the vault application.
+Description: StarlingX Vault FluxCD Helm Charts
+ This package contains FluxCD helm charts for the vault application.
