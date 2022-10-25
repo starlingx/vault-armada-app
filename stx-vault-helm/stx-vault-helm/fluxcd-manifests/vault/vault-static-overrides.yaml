@@ -17,10 +17,13 @@ manager:
     - key: "node-role.kubernetes.io/master"
       operator: "Exists"
       effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
 injector:
   enabled: true
   nodeSelector: |
-    node-role.kubernetes.io/master: ""
+    node-role.kubernetes.io/control-plane: ""
   image:
     repository: hashicorp/vault-k8s
     tag: 0.4.0
@@ -29,6 +32,9 @@ injector:
     tag: 1.4.2
   tolerations: |
     - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
 server:
@@ -46,6 +52,9 @@ server:
     tag: 1.4.2
   tolerations: |
     - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
   auditStorage:
