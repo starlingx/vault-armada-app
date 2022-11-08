@@ -4,7 +4,7 @@ export DH_VERBOSE = 1
 export ROOT = debian/tmp
 export APP_FOLDER = $(ROOT)/usr/lib/helm
 
-export APP_TARBALL = vault-0.6.0.tgz
+export APP_TARBALL = vault-0.19.0.tgz
 export STAGING = staging
 
 %:

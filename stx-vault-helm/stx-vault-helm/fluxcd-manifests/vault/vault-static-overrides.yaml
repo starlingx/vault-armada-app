@@ -26,10 +26,10 @@ injector:
     node-role.kubernetes.io/control-plane: ""
   image:
     repository: hashicorp/vault-k8s
-    tag: 0.4.0
+    tag: 0.14.2
   agentImage:
-    repository: vault
-    tag: 1.4.2
+    repository: hashicorp/vault
+    tag: 1.9.2
   tolerations: |
     - key: "node-role.kubernetes.io/master"
       operator: "Exists"
@@ -48,8 +48,8 @@ server:
               component: server
           topologyKey: kubernetes.io/hostname
   image:
-    repository: vault
-    tag: 1.4.2
+    repository: hashicorp/vault
+    tag: 1.9.2
   tolerations: |
     - key: "node-role.kubernetes.io/master"
       operator: "Exists"
