@@ -49,6 +49,7 @@
     parent: tox
     description: |
       Run pylint test for k8sapp_vault
+    nodeset: ubuntu-bionic
     required-projects:
       - starlingx/config
       - starlingx/fault
