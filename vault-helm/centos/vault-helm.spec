@@ -20,7 +20,7 @@ Group: base
 Packager: Wind River <info@windriver.com>
 URL: unknown
 
-Source0: helm-charts-vault-0-6-0.tar.gz
+Source0: helm-charts-vault-0-19-0.tar.gz
 Source1: repositories.yaml
 Source2: index.yaml
 Source3: Makefile

@@ -1,20 +1,19 @@
-From 48b0d72dffcef539823bb66f49d5da327611434f Mon Sep 17 00:00:00 2001
-From: Michel Thebeau <Michel.Thebeau@windriver.com>
-Date: Thu, 1 Apr 2021 18:12:49 -0400
-Subject: [PATCH] Add vault-manager repository to values.yaml
+From 2582b808e3fdeb33f47f69ff1fd024f8f42d794d Mon Sep 17 00:00:00 2001
+From: Greg Waines <greg.waines@windriver.com>
+Date: Sat, 5 Nov 2022 20:14:58 -0400
+Subject: [PATCH] Add vault manager repository to values.yaml
 
-Signed-off-by: Michel Thebeau <Michel.Thebeau@windriver.com>
 ---
  values.yaml | 5 +++++
  1 file changed, 5 insertions(+)
 
 diff --git a/values.yaml b/values.yaml
-index 8c6e4a3..250c1a7 100644
+index 61af7b2..76833e7 100644
 --- a/values.yaml
 +++ b/values.yaml
-@@ -13,6 +13,11 @@ global:
-   # Beta Feature: If deploying to OpenShift
-   openshift: false
+@@ -24,6 +24,11 @@ global:
+       seccomp.security.alpha.kubernetes.io/defaultProfileName:  runtime/default
+       apparmor.security.beta.kubernetes.io/defaultProfileName:  runtime/default
  
 +manager:
 +  image:
@@ -25,5 +24,5 @@ index 8c6e4a3..250c1a7 100644
    # True if you want to enable vault agent injection.
    enabled: true
 -- 
-2.29.2
+2.34.1
 

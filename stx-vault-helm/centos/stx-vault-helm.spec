@@ -20,7 +20,7 @@ Packager: Wind River <info@windriver.com>
 URL: unknown
 
 # External helm chart source
-Source0: helm-charts-vault-0-6-0.tar.gz
+Source0: helm-charts-vault-0-19-0.tar.gz
 
 # psp-rolebinding source from stx/helm-charts/psp-rolebinding
 # plugins source from stx/vault-armada-app/python-k8sapp-vault
@@ -37,7 +37,7 @@ BuildRequires: python-k8sapp-vault-wheels
 StarlingX Vault FluxCD Helm Charts
 
 %prep
-%setup -n helm-charts-vault-0-6-0-1.0.0
+%setup -n helm-charts-vault-0-19-0-1.0.0
 
 %build
 chartmuseum --debug --port=8879 --context-path='/charts' --storage="local" --storage-local-rootdir="." &
