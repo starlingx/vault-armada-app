@@ -1,7 +1,0 @@
-SRC_DIR="k8sapp_vault"
-
-# Keep the SRCREV in sync with stx-vault-helm so the app version is the
-# same as the plugin version
-
-TIS_BASE_SRCREV=77715cf9146c04c401e6fdae51cd865953f82ef4
-TIS_PATCH_VER=GITREVCOUNT
