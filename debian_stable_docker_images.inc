@@ -1,0 +1,1 @@
+stx-vault-manager
