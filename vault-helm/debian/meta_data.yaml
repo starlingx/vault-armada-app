@@ -16,3 +16,6 @@ src_files:
 revision:
   dist: $STX_DIST
   PKG_GITREVCOUNT: true
+  GITREVCOUNT:
+    SRC_DIR: ${MY_REPO}/stx/vault-armada-app/vault-helm
+    BASE_SRCREV: ccdb17d29610247eebf45e862ff9f30ff18432eb
