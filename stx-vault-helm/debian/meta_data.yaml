@@ -8,4 +8,4 @@ revision:
   dist: $STX_DIST
   GITREVCOUNT:
     SRC_DIR: ${MY_REPO}/stx/vault-armada-app
-    BASE_SRCREV: c92fc3309e5f2f797fa55d459024c3a587b3fdb9
+    BASE_SRCREV: ccdb17d29610247eebf45e862ff9f30ff18432eb
