@@ -6,7 +6,6 @@
 
 from sysinv.common import constants
 from sysinv.tests.db import base as dbbase
-from sysinv.tests.helm.test_helm import HelmOperatorTestSuiteMixin
 
 
 class K8SAppVaultAppMixin(object):
@@ -25,7 +24,6 @@ class K8SAppVaultAppMixin(object):
 class K8sAppVaultControllerTestCase(K8SAppVaultAppMixin,
                                       dbbase.BaseIPv6Mixin,
                                       dbbase.BaseCephStorageBackendMixin,
-                                      HelmOperatorTestSuiteMixin,
                                       dbbase.ControllerHostTestCase):
     pass
 
@@ -37,6 +35,5 @@ class K8sAppVaultControllerTestCase(K8SAppVaultAppMixin,
 # - vault app
 class K8SAppVaultAIOTestCase(K8SAppVaultAppMixin,
                                dbbase.BaseCephStorageBackendMixin,
-                               HelmOperatorTestSuiteMixin,
                                dbbase.AIOSimplexHostTestCase):
     pass
