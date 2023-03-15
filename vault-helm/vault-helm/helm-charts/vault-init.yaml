@@ -10,6 +10,9 @@ data:
     WORKDIR=$PVCDIR # PVC location so that keys can be persisted
 
     # FUNCTIONS
+    function log {
+        echo "$(date +%Y-%m-%dT%H-%M-%S)  $@"
+    }
 
     # Creates a list of all k8s vault pods and stores in text file.
     # Converts ips from X.X.X.X or a:b:c::d to X-X-X-X for use as pod dns names
@@ -35,7 +38,7 @@ data:
 
         while [ $CURRENT_PODS != $DESIRED_PODS ]; do
             sleep 5
-            echo "Waiting for {{ template "vault.fullname" . }} statefulset running pods ($CURRENT_PODS) to equal desired pods ($DESIRED_PODS)"
+            log "Waiting for {{ template "vault.fullname" . }} statefulset running pods ($CURRENT_PODS) to equal desired pods ($DESIRED_PODS)"
             CURRENT_PODS=$(kubectl get pods \
                         -l component=server,app.kubernetes.io/name=vault \
                         -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
@@ -49,7 +52,7 @@ data:
     # Stores the root token and master key shards in plaintext in working directory as cluster_keys.json - insecure.
     function initVault {
         V0=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
-        echo "Initializing $V0"
+        log "Initializing $V0"
         curl -s \
         --cacert $CERT \
         --request POST \
@@ -79,7 +82,7 @@ data:
                       --data "{\"leader_api_addr\": \"https://sva-{{ template "vault.name" .}}-active.$SVCDOMAIN:8200\", \"leader_ca_cert\": \"$CA_ONELINE\"}" \
                       https://$row.$DOMAIN:8200/v1/sys/storage/raft/join)
 
-           echo "$row $RAFT_STATUS"
+           log "$row $RAFT_STATUS"
            RAFT_STATUS=$(echo $RAFT_STATUS | jq -r .joined)
            sleep 1
        done
@@ -99,40 +102,44 @@ data:
     waitForPods
 
     echo ""
-    echo "Putting a list of vault pods and ip in $WORKDIR/pods.txt"
+    log "Putting a list of vault pods and ip in $WORKDIR/pods.txt"
     getVaultPods
 
     echo ""
     row=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
     vaultServerStatus > $WORKDIR/healthcheck.txt
     TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .initialized)
-    grep $row $WORKDIR/pods.txt && echo "Initialized status is $TEMP"
+    text="$( grep $row $WORKDIR/pods.txt )"
+    if [ $? -eq 0 ]; then
+        log "$text"
+        log "Initialized status is $TEMP"
+    fi
     if [ ! -z $TEMP ] && [ $TEMP = false ]; then
 
-        echo "Initializing the vault on vault-0 and storing keys in $WORKDIR/cluster_keys.json"
+        log "Initializing the vault on vault-0 and storing keys in $WORKDIR/cluster_keys.json"
         initVault
         cp $WORKDIR/cluster_keys.json $WORKDIR/cluster_init.json
         sleep 10 #Some sleep required to allow convergence"
 
         echo ""
-        echo "Unsealing vault-0 using the init shards"
+        log "Unsealing vault-0 using the init shards"
         for row in $(awk 'NR==1{print $2}' $WORKDIR/pods.txt); do
             VAULT=$row
             unsealVault
         done
 
         echo ""
-        echo "Joining other vault servers to the HA Raft cluster"
+        log "Joining other vault servers to the HA Raft cluster"
         for row in $(awk 'NR>1{print $2}' $WORKDIR/pods.txt); do
-            grep $row $WORKDIR/pods.txt
+            log "$( grep $row $WORKDIR/pods.txt )"
             joinRaft
             sleep 5
         done
 
         echo ""
-        echo "Unsealing the remaining vaults"
+        log "Unsealing the remaining vaults"
         for row in $(awk 'NR>1{print $2}' $WORKDIR/pods.txt); do
-            grep $row $WORKDIR/pods.txt
+            log "$( grep $row $WORKDIR/pods.txt )"
             VAULT=$row
             unsealVault
             sleep 10
@@ -142,16 +149,20 @@ data:
     # Loop forever to check the seal status of vaults and unseal if required
     while true; do
         sleep 5
-        echo "Checking vault pods seal status"
+        log "Checking vault pods seal status"
         rm $WORKDIR/pods.txt
         getVaultPods
         for row in $(awk '{print $2}' $WORKDIR/pods.txt); do
            vaultServerStatus > $WORKDIR/healthcheck.txt
            TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .sealed)
-           grep $row $WORKDIR/pods.txt && echo "Sealed status is $TEMP"
+           text="$( grep $row $WORKDIR/pods.txt )"
+           if [ $? -eq 0 ]; then
+              log "$text"
+              log "Sealed status is $TEMP"
+           fi
            if [ ! -z $TEMP ] && [ $TEMP = true ]; then
               VAULT=$row
-              echo "Unsealing $row"
+              log "Unsealing $row"
               unsealVault
            fi
         done
