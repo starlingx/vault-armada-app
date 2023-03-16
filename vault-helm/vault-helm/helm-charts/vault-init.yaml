@@ -9,6 +9,10 @@ data:
     SVCDOMAIN={{ .Release.Namespace }}.svc.cluster.local
     WORKDIR=$PVCDIR # PVC location so that keys can be persisted
 
+    # Records for seal status state machine:
+    PODREC_F="$WORKDIR/previous_pods_status.txt"
+    PODREC_TMP_F="$WORKDIR/new_pods_status.txt"
+
     # FUNCTIONS
     function log {
         echo "$(date +%Y-%m-%dT%H-%M-%S)  $@"
@@ -147,25 +151,36 @@ data:
     fi
 
     # Loop forever to check the seal status of vaults and unseal if required
+    log "Checking vault pods seal status in perpetuity..."
+    echo "" > "$PODREC_F"
     while true; do
         sleep 5
-        log "Checking vault pods seal status"
         rm $WORKDIR/pods.txt
+        echo "" > "$PODREC_TMP_F"
         getVaultPods
-        for row in $(awk '{print $2}' $WORKDIR/pods.txt); do
+        while read host row; do
+           if [ -z "$row" ]; then
+               # probably a recovering pod waiting for an IP address
+               log "pod list has empty data: [$host] [$row]"
+               continue
+           fi
            vaultServerStatus > $WORKDIR/healthcheck.txt
            TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .sealed)
-           text="$( grep $row $WORKDIR/pods.txt )"
-           if [ $? -eq 0 ]; then
-              log "$text"
-              log "Sealed status is $TEMP"
+           # log compression: do not print logs when status is unchanged
+           status_rec="/$host/$row/$TEMP/"
+           echo "$status_rec" >> "$PODREC_TMP_F"
+           grep -q "$status_rec" "$PODREC_F"
+           if [ $? -ne 0 ]; then
+               log "$( grep $row $WORKDIR/pods.txt )"
+               log "Sealed status is now: $TEMP"
            fi
            if [ ! -z $TEMP ] && [ $TEMP = true ]; then
               VAULT=$row
               log "Unsealing $row"
               unsealVault
            fi
-        done
+        done <$WORKDIR/pods.txt
+        mv "$PODREC_TMP_F" "$PODREC_F"
     done
 kind: ConfigMap
 metadata:
