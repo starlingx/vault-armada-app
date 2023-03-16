@@ -106,7 +106,7 @@ data:
     row=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
     vaultServerStatus > $WORKDIR/healthcheck.txt
     TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .initialized)
-    grep $row $WORKDIR/pods.txt & echo "Initialized status is $TEMP"
+    grep $row $WORKDIR/pods.txt && echo "Initialized status is $TEMP"
     if [ ! -z $TEMP ] && [ $TEMP = false ]; then
 
         echo "Initializing the vault on vault-0 and storing keys in $WORKDIR/cluster_keys.json"
@@ -148,7 +148,7 @@ data:
         for row in $(awk '{print $2}' $WORKDIR/pods.txt); do
            vaultServerStatus > $WORKDIR/healthcheck.txt
            TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .sealed)
-           grep $row $WORKDIR/pods.txt & echo "Sealed status is $TEMP"
+           grep $row $WORKDIR/pods.txt && echo "Sealed status is $TEMP"
            if [ ! -z $TEMP ] && [ $TEMP = true ]; then
               VAULT=$row
               echo "Unsealing $row"
