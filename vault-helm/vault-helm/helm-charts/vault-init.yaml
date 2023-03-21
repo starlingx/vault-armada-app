@@ -3,11 +3,17 @@ data:
   init.sh: |
     #!/bin/bash
 
-    CERT=$CA_CERT # Get the CA path from environment vars
-    CA_ONELINE=$(awk '{printf "%s\\n", $0}' $CERT) # Store cert as a oneliner for curl purposes
-    DOMAIN={{ .Release.Namespace }}.pod.cluster.local # Set the domain for resolving pod names
+    # Get the CA path from environment vars
+    CERT=$CA_CERT
+    # Store cert as a oneliner for curl purposes
+    CA_ONELINE=$(awk '{printf "%s\\n", $0}' $CERT)
+
+    # Set the domain for resolving pod names
+    DOMAIN={{ .Release.Namespace }}.pod.cluster.local
     SVCDOMAIN={{ .Release.Namespace }}.svc.cluster.local
-    WORKDIR=$PVCDIR # PVC location so that keys can be persisted
+
+    # PVC location so that keys can be persisted
+    WORKDIR=$PVCDIR
 
     # Records for seal status state machine:
     PODREC_F="$WORKDIR/previous_pods_status.txt"
@@ -37,7 +43,8 @@ data:
     }
 
     # Creates a list of all k8s vault pods and stores in text file.
-    # Converts ips from X.X.X.X or a:b:c::d to X-X-X-X for use as pod dns names
+    # Converts ips from X.X.X.X or a:b:c::d to X-X-X-X for use as pod
+    # dns names
     function getVaultPods {
         kubectl get pods \
         -n {{ .Release.Namespace }} \
@@ -48,7 +55,8 @@ data:
         sed -i 's/\.\|:/-/g' $WORKDIR/pods.txt
     }
 
-    # Wait for the vault servers in the stateful set to be created before initializing
+    # Wait for the vault servers in the stateful set to be
+    # created before initializing
     function waitForPods {
         CURRENT_PODS=$(kubectl get pods \
                     -l component=server,app.kubernetes.io/name=vault \
@@ -60,18 +68,22 @@ data:
 
         while [ $CURRENT_PODS != $DESIRED_PODS ]; do
             sleep "$STATEFULSET_RATE"
-            log "Waiting for {{ template "vault.fullname" . }} statefulset running pods ($CURRENT_PODS) to equal desired pods ($DESIRED_PODS)"
+            log "Waiting for {{ template "vault.fullname" . }}" \
+                "statefulset running pods ($CURRENT_PODS) to equal" \
+                "desired pods ($DESIRED_PODS)"
             CURRENT_PODS=$(kubectl get pods \
-                        -l component=server,app.kubernetes.io/name=vault \
-                        -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
-                        {end}' \
-                        | grep Running \
-                        | wc -l)
+                -l component=server,app.kubernetes.io/name=vault \
+                -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
+                {end}' \
+                | grep Running \
+                | wc -l)
         done
     }
 
-    # Initializes the first vault pod, only needs to be performed once after deploying the helm chart
-    # Stores the root token and master key shards in plaintext in working directory as cluster_keys.json - insecure.
+    # Initializes the first vault pod, only needs to be performed once
+    # after deploying the helm chart
+    # Stores the root token and master key shards in plaintext in
+    # working directory as cluster_keys.json - insecure.
     function initVault {
         V0=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
         log "Initializing $V0"
@@ -85,33 +97,38 @@ data:
 
     # Uses the master key shards in cluster_keys.json to unseal vault
     function unsealVault {
-        for shard in $(cat $WORKDIR/cluster_keys.json | jq -r .keys_base64[]); do
-            echo {\"key\": \"$shard\"} | curl -s --cacert $CERT --request POST -d @- https://$VAULT.$DOMAIN:8200/v1/sys/unseal > /dev/null
+        shards="$(cat $WORKDIR/cluster_keys.json | jq -r .keys_base64[])"
+        for shard in $shards; do
+            echo {\"key\": \"$shard\"} \
+            | curl -s --cacert $CERT --request POST -d @- \
+                https://$VAULT.$DOMAIN:8200/v1/sys/unseal > /dev/null
             #Some sleep is required to allow Raft convergence
             sleep "$UNSEAL_CONVERGE_TIME"
         done
     }
 
-    # Takes the address of vault-0 as the cluster leader and joins other nodes to raft
+    # Takes the address of vault-0 as the cluster leader and
+    # joins other nodes to raft
     function joinRaft {
-       CLUSTER_LEAD=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
-       ROOT_TOKEN=$(cat $WORKDIR/cluster_keys.json | jq -r .root_token)
-       RAFT_STATUS=""
-       while [ "$RAFT_STATUS" != "true" ]; do
-           RAFT_STATUS=$(curl -s \
-                      --cacert $CERT \
-                      -H "X-Vault-Token: $ROOT_TOKEN" \
-                      --request POST \
-                      --data "{\"leader_api_addr\": \"https://sva-{{ template "vault.name" .}}-active.$SVCDOMAIN:8200\", \"leader_ca_cert\": \"$CA_ONELINE\"}" \
-                      https://$row.$DOMAIN:8200/v1/sys/storage/raft/join)
+        CLUSTER_LEAD=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
+        ROOT_TOKEN=$(cat $WORKDIR/cluster_keys.json | jq -r .root_token)
+        RAFT_STATUS=""
+        while [ "$RAFT_STATUS" != "true" ]; do
+            RAFT_STATUS=$(curl -s \
+                --cacert $CERT \
+                -H "X-Vault-Token: $ROOT_TOKEN" \
+                --request POST \
+                --data "{\"leader_api_addr\": \"https://sva-{{ template "vault.name" .}}-active.$SVCDOMAIN:8200\", \"leader_ca_cert\": \"$CA_ONELINE\"}" \
+                https://$row.$DOMAIN:8200/v1/sys/storage/raft/join)
 
-           log "$row $RAFT_STATUS"
-           RAFT_STATUS=$(echo $RAFT_STATUS | jq -r .joined)
-           sleep "$JOIN_CONVERGE_TIME"
-       done
+            log "$row $RAFT_STATUS"
+            RAFT_STATUS=$(echo $RAFT_STATUS | jq -r .joined)
+            sleep "$JOIN_CONVERGE_TIME"
+        done
     }
 
-    # Simply calls the status check of a vault, used to check if it is initialized, unsealed, or part of raft cluster
+    # Simply calls the status check of a vault, used to check if it is
+    # initialized, unsealed, or part of raft cluster
     function vaultServerStatus {
         curl --cacert $CERT -s https://$row.$DOMAIN:8200/v1/sys/health
     }
@@ -204,7 +221,8 @@ data:
     fi
     if [ ! -z $TEMP ] && [ $TEMP = false ]; then
 
-        log "Initializing the vault on vault-0 and storing keys in $WORKDIR/cluster_keys.json"
+        log "Initializing the vault on vault-0 and" \
+            "storing keys in $WORKDIR/cluster_keys.json"
         initVault
         cp $WORKDIR/cluster_keys.json $WORKDIR/cluster_init.json
         #Some sleep required to allow convergence"
@@ -254,17 +272,17 @@ data:
         echo "" > "$PODREC_TMP_F"
         getVaultPods
         while read host row; do
-           if [ -z "$row" ]; then
-               # probably a recovering pod waiting for an IP address
-               log "pod list has empty data: [$host] [$row]"
-               continue
-           fi
-           vaultServerStatus > $WORKDIR/healthcheck.txt
-           TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .sealed)
+            if [ -z "$row" ]; then
+                # probably a recovering pod waiting for an IP address
+                log "pod list has empty data: [$host] [$row]"
+                continue
+            fi
+            vaultServerStatus > $WORKDIR/healthcheck.txt
+            TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .sealed)
 
-           # Decide when to unseal the vault server; includes
-           # Adding records to new_pods_status.txt
-           runStateMachine "$host" "$row" "$TEMP"
+            # Decide when to unseal the vault server; includes
+            # Adding records to new_pods_status.txt
+            runStateMachine "$host" "$row" "$TEMP"
         done <$WORKDIR/pods.txt
         mv "$PODREC_TMP_F" "$PODREC_F"
     done
