@@ -1,17 +1,17 @@
-From 082acde5ed324c421bbc28bd2fc3d5bdcb78296b Mon Sep 17 00:00:00 2001
+From ef953bc9a8f961c40fd8c6a051b04232ca1849c2 Mon Sep 17 00:00:00 2001
 From: Greg Waines <greg.waines@windriver.com>
 Date: Sat, 5 Nov 2022 20:14:58 -0400
 Subject: [PATCH] Add vault manager repository to values.yaml
 
 ---
- values.yaml | 12 ++++++++++++
- 1 file changed, 12 insertions(+)
+ values.yaml | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
 
 diff --git a/values.yaml b/values.yaml
-index 61af7b2..bce8bae 100644
+index 61af7b2..15f5287 100644
 --- a/values.yaml
 +++ b/values.yaml
-@@ -24,6 +24,18 @@ global:
+@@ -24,6 +24,30 @@ global:
        seccomp.security.alpha.kubernetes.io/defaultProfileName:  runtime/default
        apparmor.security.beta.kubernetes.io/defaultProfileName:  runtime/default
  
@@ -26,6 +26,18 @@ index 61af7b2..bce8bae 100644
 +  # This value is the sleep, in seconds, between intervals.  Value
 +  # must be a positive integer
 +  statusCheckRate: 5
++
++  # After initial configuration, in combination with statusCheckRate,
++  # the amount of time to wait before unsealing a recovering vault
++  # server.  The option is intended to allow the active vault server
++  # time to start sending heartbeats to the recovering pod before
++  # unsealing the server.
++  #
++  # A value of 0 indicates no wait time: unseal the vault server without
++  # delay.  The wait time is statusCheckRate * unsealWaitIntervals.
++  # Default is 5 s/interval * 3 intervals == 15 seconds.
++  #
++  unsealWaitIntervals: 3
 +
  injector:
    # True if you want to enable vault agent injection.
