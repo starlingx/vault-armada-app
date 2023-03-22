@@ -1,17 +1,17 @@
-From 2582b808e3fdeb33f47f69ff1fd024f8f42d794d Mon Sep 17 00:00:00 2001
+From 082acde5ed324c421bbc28bd2fc3d5bdcb78296b Mon Sep 17 00:00:00 2001
 From: Greg Waines <greg.waines@windriver.com>
 Date: Sat, 5 Nov 2022 20:14:58 -0400
 Subject: [PATCH] Add vault manager repository to values.yaml
 
 ---
- values.yaml | 5 +++++
- 1 file changed, 5 insertions(+)
+ values.yaml | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
 
 diff --git a/values.yaml b/values.yaml
-index 61af7b2..76833e7 100644
+index 61af7b2..bce8bae 100644
 --- a/values.yaml
 +++ b/values.yaml
-@@ -24,6 +24,11 @@ global:
+@@ -24,6 +24,18 @@ global:
        seccomp.security.alpha.kubernetes.io/defaultProfileName:  runtime/default
        apparmor.security.beta.kubernetes.io/defaultProfileName:  runtime/default
  
@@ -20,9 +20,16 @@ index 61af7b2..76833e7 100644
 +    repository: starlingx/stx-vault-manager
 +    tag: stx-8.0-v1.24.4
 +
++  # Rate at which vault-manager checks status of vault servers.
++  # After initialization of the raft, Vault manager will loop forever
++  # checking the pods for vault servers that need to be unsealed.
++  # This value is the sleep, in seconds, between intervals.  Value
++  # must be a positive integer
++  statusCheckRate: 5
++
  injector:
    # True if you want to enable vault agent injection.
    enabled: true
 -- 
-2.34.1
+2.25.1
 

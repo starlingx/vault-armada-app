@@ -13,6 +13,17 @@ data:
     PODREC_F="$WORKDIR/previous_pods_status.txt"
     PODREC_TMP_F="$WORKDIR/new_pods_status.txt"
 
+    STATEFULSET_RATE=5
+    INIT_CONVERGE_TIME=10
+    JOIN_RATE=5
+    JOIN_CONVERGE_TIME=1
+    UNSEAL_RATE=10
+    UNSEAL_CONVERGE_TIME=3
+    STATUS_RATE={{ .Values.manager.statusCheckRate }}
+    if [ -z "$STATUS_RATE" ]; then
+        STATUS_RATE=5
+    fi
+
     # FUNCTIONS
     function log {
         echo "$(date +%Y-%m-%dT%H-%M-%S)  $@"
@@ -41,7 +52,7 @@ data:
         DESIRED_PODS={{ .Values.server.ha.replicas }}
 
         while [ $CURRENT_PODS != $DESIRED_PODS ]; do
-            sleep 5
+            sleep "$STATEFULSET_RATE"
             log "Waiting for {{ template "vault.fullname" . }} statefulset running pods ($CURRENT_PODS) to equal desired pods ($DESIRED_PODS)"
             CURRENT_PODS=$(kubectl get pods \
                         -l component=server,app.kubernetes.io/name=vault \
@@ -69,7 +80,8 @@ data:
     function unsealVault {
         for shard in $(cat $WORKDIR/cluster_keys.json | jq -r .keys_base64[]); do
             echo {\"key\": \"$shard\"} | curl -s --cacert $CERT --request POST -d @- https://$VAULT.$DOMAIN:8200/v1/sys/unseal > /dev/null
-            sleep 3 #Some sleep is required to allow Raft convergence
+            #Some sleep is required to allow Raft convergence
+            sleep "$UNSEAL_CONVERGE_TIME"
         done
     }
 
@@ -88,7 +100,7 @@ data:
 
            log "$row $RAFT_STATUS"
            RAFT_STATUS=$(echo $RAFT_STATUS | jq -r .joined)
-           sleep 1
+           sleep "$JOIN_CONVERGE_TIME"
        done
     }
 
@@ -123,7 +135,8 @@ data:
         log "Initializing the vault on vault-0 and storing keys in $WORKDIR/cluster_keys.json"
         initVault
         cp $WORKDIR/cluster_keys.json $WORKDIR/cluster_init.json
-        sleep 10 #Some sleep required to allow convergence"
+        #Some sleep required to allow convergence"
+        sleep "$INIT_CONVERGE_TIME"
 
         echo ""
         log "Unsealing vault-0 using the init shards"
@@ -137,7 +150,7 @@ data:
         for row in $(awk 'NR>1{print $2}' $WORKDIR/pods.txt); do
             log "$( grep $row $WORKDIR/pods.txt )"
             joinRaft
-            sleep 5
+            sleep "$JOIN_RATE"
         done
 
         echo ""
@@ -146,7 +159,7 @@ data:
             log "$( grep $row $WORKDIR/pods.txt )"
             VAULT=$row
             unsealVault
-            sleep 10
+            sleep "$UNSEAL_RATE"
         done
     fi
 
@@ -154,7 +167,7 @@ data:
     log "Checking vault pods seal status in perpetuity..."
     echo "" > "$PODREC_F"
     while true; do
-        sleep 5
+        sleep "$STATUS_RATE"
         rm $WORKDIR/pods.txt
         echo "" > "$PODREC_TMP_F"
         getVaultPods
