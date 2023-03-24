@@ -24,6 +24,13 @@ data:
         STATUS_RATE=5
     fi
 
+    # with STATUS_RATE, the period to delay unseal
+    # STATUS_RATE * STATEMACH_START seconds
+    STATEMACH_START={{ .Values.manager.unsealWaitIntervals }}
+    if [ -z "$STATEMACH_START" ]; then
+        STATEMACH_START=3
+    fi
+
     # FUNCTIONS
     function log {
         echo "$(date +%Y-%m-%dT%H-%M-%S)  $@"
@@ -109,6 +116,71 @@ data:
         curl --cacert $CERT -s https://$row.$DOMAIN:8200/v1/sys/health
     }
 
+    function runStateMachine {
+        local host="$1"
+        local dns_name="$2"
+        local sealed="$3"
+        local VAULT="$dns_name"
+        local status_rec
+        local old_rec
+        local counter
+
+        status_rec="/$host/$dns_name/$sealed/"
+
+        # log compression: do not print logs when status is unchanged
+        # omit counter when checking vault server state change
+        old_rec="$( grep "$status_rec" "$PODREC_F" )"
+        if [ $? -ne 0 ]; then
+            log "$( grep "$dns_name" $WORKDIR/pods.txt )"
+            log "Sealed status is now: $sealed"
+
+            # reread the record by hostname only
+            old_rec="$( grep "^/$host/" "$PODREC_F" )"
+        fi
+
+        if [ "$sealed" != "true" ]; then
+            # There is nothing more to do: the vault is unsealed
+            # or the sealed status is unclear
+            echo "$status_rec" >> "$PODREC_TMP_F"
+            return
+        fi
+
+        # The vault is sealed
+        #
+        # Check if there is a countdown in progress
+        #
+        # else -z old_rec: "the pod didn't have an IP address the last
+        # iteration, but now it does" - treat the same as "sealed
+        # without a countdown"
+        counter=""
+        if [ -n "$old_rec" ]; then
+            counter="$( echo "$old_rec" | awk -F/ '{print $5}' )"
+        fi
+
+        if [ -z "$counter" ]; then
+            # sealed without a countdown: start counting
+            log "Sealed vault $host: begin unseal delay:" \
+                "$( expr "$STATUS_RATE" \* "$STATEMACH_START" )s"
+            echo "${status_rec}${STATEMACH_START}" >> "$PODREC_TMP_F"
+            return
+        fi
+
+        # Check for end of period: 1 means "zero at this interval"
+        # "less than 1" for resilience
+        if [ "$counter" -le 1 -o "$STATEMACH_START" -eq 0 ]; then
+            # We've waited (STATUS_RATE * STATEMACH_START) seconds
+            # Or, STATEMACH_START == 0 means do not delay
+            log "Unsealing $dns_name"
+            unsealVault
+            echo "$status_rec" >> "$PODREC_TMP_F"
+            return
+        fi
+
+        # finally, continue to countdown
+        counter="$( expr "$counter" - 1 )"
+        echo "${status_rec}${counter}" >> "$PODREC_TMP_F"
+    }
+
 
     #
     # LOGIC
@@ -163,9 +235,19 @@ data:
         done
     fi
 
-    # Loop forever to check the seal status of vaults and unseal if required
-    log "Checking vault pods seal status in perpetuity..."
+    # initialize the state machine - vault server status records
     echo "" > "$PODREC_F"
+    while read host dns_name; do
+        if [ -z "$host" ]; then
+            continue
+        fi
+        status_rec="/$host/$dns_name//"
+        echo "$status_rec" >> "$PODREC_F"
+    done <$WORKDIR/pods.txt
+
+    # Loop forever to check the seal status of vaults and
+    # unseal if required
+    log "Checking vault pods seal status in perpetuity..."
     while true; do
         sleep "$STATUS_RATE"
         rm $WORKDIR/pods.txt
@@ -179,19 +261,10 @@ data:
            fi
            vaultServerStatus > $WORKDIR/healthcheck.txt
            TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .sealed)
-           # log compression: do not print logs when status is unchanged
-           status_rec="/$host/$row/$TEMP/"
-           echo "$status_rec" >> "$PODREC_TMP_F"
-           grep -q "$status_rec" "$PODREC_F"
-           if [ $? -ne 0 ]; then
-               log "$( grep $row $WORKDIR/pods.txt )"
-               log "Sealed status is now: $TEMP"
-           fi
-           if [ ! -z $TEMP ] && [ $TEMP = true ]; then
-              VAULT=$row
-              log "Unsealing $row"
-              unsealVault
-           fi
+
+           # Decide when to unseal the vault server; includes
+           # Adding records to new_pods_status.txt
+           runStateMachine "$host" "$row" "$TEMP"
         done <$WORKDIR/pods.txt
         mv "$PODREC_TMP_F" "$PODREC_F"
     done
