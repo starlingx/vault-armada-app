@@ -2,8 +2,6 @@
 debname: stx-vault-helm
 debver: 1.0-1
 src_path: stx-vault-helm
-src_files:
-  - ${MY_REPO}/stx/helm-charts/psp-rolebinding/psp-rolebinding/helm-charts
 revision:
   dist: $STX_DIST
   GITREVCOUNT:
