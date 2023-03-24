@@ -9,5 +9,4 @@ kind: Kustomization
 namespace: vault
 resources:
   - base
-  - vault-psp-rolebinding
   - vault
