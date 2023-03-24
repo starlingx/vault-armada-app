@@ -19,6 +19,9 @@ data:
     PODREC_F="$WORKDIR/previous_pods_status.txt"
     PODREC_TMP_F="$WORKDIR/new_pods_status.txt"
 
+    # Vault server health query timeout during HA recovery scenario
+    QUERY_TMOUT={{ .Values.manager.healthQueryTimeout }}
+
     STATEFULSET_RATE=5
     INIT_CONVERGE_TIME=10
     JOIN_RATE=5
@@ -41,6 +44,11 @@ data:
     function log {
         echo "$(date +%Y-%m-%dT%H-%M-%S)  $@"
     }
+
+    if ! [[ "$QUERY_TMOUT" =~ ^[0-9]+$ ]]; then
+        log ".Values.manager.healthQueryTimeout not an integer"
+        QUERY_TMOUT=""
+    fi
 
     # Creates a list of all k8s vault pods and stores in text file.
     # Converts ips from X.X.X.X or a:b:c::d to X-X-X-X for use as pod
@@ -130,7 +138,13 @@ data:
     # Simply calls the status check of a vault, used to check if it is
     # initialized, unsealed, or part of raft cluster
     function vaultServerStatus {
-        curl --cacert $CERT -s https://$row.$DOMAIN:8200/v1/sys/health
+        local tmout=""
+
+        if [ -n "$1" ]; then
+            tmout="--connect-timeout $1"
+        fi
+        curl $tmout --cacert $CERT -s \
+            https://$row.$DOMAIN:8200/v1/sys/health
     }
 
     function runStateMachine {
@@ -277,7 +291,7 @@ data:
                 log "pod list has empty data: [$host] [$row]"
                 continue
             fi
-            vaultServerStatus > $WORKDIR/healthcheck.txt
+            vaultServerStatus $QUERY_TMOUT > $WORKDIR/healthcheck.txt
             TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .sealed)
 
             # Decide when to unseal the vault server; includes

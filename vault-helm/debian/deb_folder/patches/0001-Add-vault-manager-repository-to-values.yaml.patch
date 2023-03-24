@@ -1,17 +1,17 @@
-From ef953bc9a8f961c40fd8c6a051b04232ca1849c2 Mon Sep 17 00:00:00 2001
+From 3a687b597f91a7f344a22d5f63b24159880ee74f Mon Sep 17 00:00:00 2001
 From: Greg Waines <greg.waines@windriver.com>
 Date: Sat, 5 Nov 2022 20:14:58 -0400
 Subject: [PATCH] Add vault manager repository to values.yaml
 
 ---
- values.yaml | 24 ++++++++++++++++++++++++
- 1 file changed, 24 insertions(+)
+ values.yaml | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
 
 diff --git a/values.yaml b/values.yaml
-index 61af7b2..15f5287 100644
+index 61af7b2..aff058b 100644
 --- a/values.yaml
 +++ b/values.yaml
-@@ -24,6 +24,30 @@ global:
+@@ -24,6 +24,43 @@ global:
        seccomp.security.alpha.kubernetes.io/defaultProfileName:  runtime/default
        apparmor.security.beta.kubernetes.io/defaultProfileName:  runtime/default
  
@@ -38,6 +38,19 @@ index 61af7b2..15f5287 100644
 +  # Default is 5 s/interval * 3 intervals == 15 seconds.
 +  #
 +  unsealWaitIntervals: 3
++
++  # Network timeout for queries to vault server /sys/health endpoint
++  #
++  # The maximum time in seconds to wait for a server to respond to
++  # health query.  This applies for the HA recovery situations, not the
++  # initialization of vault cluster.  Unsetting the value is not
++  # recommended, and defaults to curl --connect-timeout of 60 seconds.
++  #
++  # vault-manager will appear to hang if healthQueryTimeout is
++  # over-large.  This setting affects the logs, since vault-manager will
++  # issue a log when the 'sealed' status toggles between true/false and
++  # the 'unknown' value
++  healthQueryTimeout: 2
 +
  injector:
    # True if you want to enable vault agent injection.
