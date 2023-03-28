@@ -310,7 +310,7 @@ metadata:
         .: {}
         f:init.sh: {}
     manager: vault-init-unseal
-  name: vault-init-unseal
+  name: vault-init-unseal-2
   namespace: {{ .Release.Namespace }}
 ---
 {{- if and (eq (.Values.injector.enabled | toString) "true" ) (eq (.Values.global.enabled | toString) "true") }}
@@ -361,7 +361,7 @@ spec:
           - name: CA_CERT
             value: /mnt/data/ca/tls.crt
           volumeMounts:
-            - name: vault-init-unseal
+            - name: vault-init-unseal-2
               mountPath: /opt/script
               readOnly: false
             - name: manager-pvc
@@ -371,9 +371,9 @@ spec:
               mountPath: /mnt/data/ca
               readOnly: true
       volumes:
-        - name: vault-init-unseal
+        - name: vault-init-unseal-2
           configMap:
-            name: vault-init-unseal
+            name: vault-init-unseal-2
         - name: vault-ca
           secret:
             secretName: vault-ca
