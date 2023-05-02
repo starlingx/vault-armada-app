@@ -1,0 +1,32 @@
+From 4df036228070727d83a370bf7c2d98e6cf7e1a48 Mon Sep 17 00:00:00 2001
+From: Michel Thebeau <michel.thebeau@windriver.com>
+Date: Tue, 2 May 2023 14:59:18 -0400
+Subject: [PATCH] Add yaml for starlingx image handling
+
+Add values yaml compatible with starlingx platform's image pull and
+service parameter registry override handling.  The platform will pull
+the image and populate registry.local, and the vault injector agent will
+pull from registry.local.
+
+Signed-off-by: Michel Thebeau <michel.thebeau@windriver.com>
+---
+ values.yaml | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/values.yaml b/values.yaml
+index aff058b..04e1e72 100644
+--- a/values.yaml
++++ b/values.yaml
+@@ -93,6 +93,9 @@ injector:
+   # containers.  This should be set to the official Vault image.  Vault 1.3.1+ is
+   # required.
+   agentImage:
++    image:
++      repository: "hashicorp/vault"
++      tag: "1.9.2"
+     repository: "hashicorp/vault"
+     tag: "1.9.2"
+ 
+-- 
+2.25.1
+

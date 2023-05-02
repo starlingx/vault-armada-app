@@ -28,7 +28,15 @@ injector:
     repository: hashicorp/vault-k8s
     tag: 0.14.2
   agentImage:
-    repository: hashicorp/vault
+    # Add yaml compatible with starlingx platform image pull, and
+    # service-parameter registry overrides.  This will pull from
+    # private or public registry into registry.local.  docker.io
+    # registry is assumed when omitted:
+    image:
+      repository: hashicorp/vault
+      tag: 1.9.2
+    # Set the vault yaml to refer to registry.local pulled as above
+    repository: registry.local:9001/docker.io/hashicorp/vault
     tag: 1.9.2
   tolerations: |
     - key: "node-role.kubernetes.io/master"
