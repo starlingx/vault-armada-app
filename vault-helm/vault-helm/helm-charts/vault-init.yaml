@@ -338,6 +338,9 @@ spec:
         app.kubernetes.io/name: {{ template "vault.name" . }}-manager
         app.kubernetes.io/instance: {{ .Release.Name }}
         component: webhook
+        {{- if  .Values.manager.extraLabels }}
+          {{- toYaml .Values.manager.extraLabels | nindent 8 -}}
+        {{- end }}
     spec:
       serviceAccountName: "{{ template "vault.fullname" . }}"
       {{- if .Values.global.imagePullSecrets }}
