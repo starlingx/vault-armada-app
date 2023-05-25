@@ -2,9 +2,9 @@
 debname: vault-helm
 debver: 1.0-1
 dl_path:
-  name: helm-charts-vault-0-19-0.tar.gz
-  url: https://github.com/hashicorp/vault-helm/archive/v0.19.0.tar.gz
-  md5sum: 49ac588b1a1ff4cd54bfa208983a4337
+  name: helm-charts-vault-0.24.1.tar.gz
+  url: https://github.com/hashicorp/vault-helm/archive/v0.24.1.tar.gz
+  sha256sum: 9f7bd1765ca34ed9baa2cdc59aa41eaa71f62ba6b14711a57718ce75a5586f1b
 src_files:
   - vault-helm/files/Makefile
   - vault-helm/helm-charts/_helpers-CA.tpl

@@ -26,7 +26,7 @@ injector:
     node-role.kubernetes.io/control-plane: ""
   image:
     repository: hashicorp/vault-k8s
-    tag: 0.14.2
+    tag: 1.2.1
   agentImage:
     # Add yaml compatible with starlingx platform image pull, and
     # service-parameter registry overrides.  This will pull from
@@ -34,10 +34,10 @@ injector:
     # registry is assumed when omitted:
     image:
       repository: hashicorp/vault
-      tag: 1.9.2
+      tag: 1.13.1
     # Set the vault yaml to refer to registry.local pulled as above
     repository: registry.local:9001/docker.io/hashicorp/vault
-    tag: 1.9.2
+    tag: 1.13.1
   tolerations: |
     - key: "node-role.kubernetes.io/master"
       operator: "Exists"
@@ -57,7 +57,7 @@ server:
           topologyKey: kubernetes.io/hostname
   image:
     repository: hashicorp/vault
-    tag: 1.9.2
+    tag: 1.13.1
   tolerations: |
     - key: "node-role.kubernetes.io/master"
       operator: "Exists"
@@ -97,3 +97,11 @@ server:
   extraVolumes:
     - type: secret
       name: vault-server-tls
+csi:
+  image:
+    repository: "hashicorp/vault-csi-provider"
+    tag: "1.3.0"
+  agent:
+    image:
+      repository: "hashicorp/vault"
+      tag: "1.13.1"

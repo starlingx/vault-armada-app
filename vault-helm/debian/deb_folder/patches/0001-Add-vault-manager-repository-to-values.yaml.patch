@@ -1,19 +1,23 @@
-From 3a687b597f91a7f344a22d5f63b24159880ee74f Mon Sep 17 00:00:00 2001
+From 6d315af79248c13384cf5ae592eea29a8f9287f4 Mon Sep 17 00:00:00 2001
 From: Greg Waines <greg.waines@windriver.com>
 Date: Sat, 5 Nov 2022 20:14:58 -0400
 Subject: [PATCH] Add vault manager repository to values.yaml
 
+Add timing parameters for vault manager to helm values.  These
+parameters tune the timing of unsealing the vault server/raft.
+
+Signed-off-by: Michel Thebeau <michel.thebeau@windriver.com>
 ---
  values.yaml | 37 +++++++++++++++++++++++++++++++++++++
  1 file changed, 37 insertions(+)
 
 diff --git a/values.yaml b/values.yaml
-index 61af7b2..aff058b 100644
+index 9e35ac8..779beea 100644
 --- a/values.yaml
 +++ b/values.yaml
-@@ -24,6 +24,43 @@ global:
-       seccomp.security.alpha.kubernetes.io/defaultProfileName:  runtime/default
-       apparmor.security.beta.kubernetes.io/defaultProfileName:  runtime/default
+@@ -40,6 +40,43 @@ global:
+     # See the top level serverTelemetry section below before enabling this feature.
+     prometheusOperator: false
  
 +manager:
 +  image:
@@ -54,7 +58,7 @@ index 61af7b2..aff058b 100644
 +
  injector:
    # True if you want to enable vault agent injection.
-   enabled: true
+   # @default: global.enabled
 -- 
 2.25.1
 
