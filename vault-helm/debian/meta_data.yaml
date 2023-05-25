@@ -6,10 +6,7 @@ dl_path:
   url: https://github.com/hashicorp/vault-helm/archive/v0.19.0.tar.gz
   md5sum: 49ac588b1a1ff4cd54bfa208983a4337
 src_files:
-  - vault-helm/files/index.yaml
   - vault-helm/files/Makefile
-  - vault-helm/files/metadata.yaml
-  - vault-helm/files/repositories.yaml
   - vault-helm/helm-charts/_helpers-CA.tpl
   - vault-helm/helm-charts/vault-certificates.yaml
   - vault-helm/helm-charts/vault-init.yaml
