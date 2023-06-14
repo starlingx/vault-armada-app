@@ -20,6 +20,7 @@ manager:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+  unsealWaitIntervals: 0
 injector:
   enabled: true
   nodeSelector: |
