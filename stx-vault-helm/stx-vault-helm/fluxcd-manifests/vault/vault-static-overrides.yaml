@@ -98,6 +98,8 @@ server:
   extraVolumes:
     - type: secret
       name: vault-server-tls
+  readinessProbe:
+    initialDelaySeconds: 25
 csi:
   image:
     repository: "hashicorp/vault-csi-provider"
