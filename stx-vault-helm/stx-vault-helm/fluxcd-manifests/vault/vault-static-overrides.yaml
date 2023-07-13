@@ -75,7 +75,7 @@ server:
     raft:
       enabled: true
       config: |
-        ui = true
+        ui = false
 
         listener "tcp" {
           tls_disable = 0
