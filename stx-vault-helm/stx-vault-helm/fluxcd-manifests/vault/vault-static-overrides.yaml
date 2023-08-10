@@ -25,6 +25,7 @@ injector:
   enabled: true
   nodeSelector: |
     node-role.kubernetes.io/control-plane: ""
+  affinity: null
   image:
     repository: hashicorp/vault-k8s
     tag: 1.2.1
