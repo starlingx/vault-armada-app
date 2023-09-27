@@ -40,13 +40,70 @@ data:
         STATEMACH_START=3
     fi
 
+    # Log levels
+    DEBUG=1
+    INFO=2
+    WARNING=3
+    ERROR=4
+    FATAL=5
+
+    # Default log level and the set log level (Initially set as default).
+    # If the log function detects an override file, then it will switch
+    # the set log level and then delete it.
+    DEFAULT_LOG_LEVEL=$INFO
+    LOG_LEVEL={{ .Values.manager.log.defaultLogLevel }}
+    LOG_OVERRIDE_FILE="$WORKDIR/log_level"
+
     # FUNCTIONS
     function log {
-        echo "$(date +%Y-%m-%dT%H-%M-%S)  $@"
+        # Log level in text
+        local logStr=""
+        case $1 in
+        $INFO)
+            logStr="INFO"
+            ;;
+        $DEBUG)
+            logStr="DEBUG"
+            ;;
+        $WARNING)
+            logStr="WARNING"
+            ;;
+        $ERROR)
+            logStr="ERROR"
+            ;;
+        $FATAL)
+            logStr="FATAL"
+            ;;
+        esac
+
+        # check if log override file "Exists"
+        if [ -f $LOG_OVERRIDE_FILE ]; then
+            local newLogLevel=$(cat $LOG_OVERRIDE_FILE)
+            # validation for newLogLevel
+            if [[ "$newLogLevel" =~ ^[1-5]$ ]]; then
+                LOG_LEVEL=$newLogLevel
+                echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG Log level set to $logStr"
+            else
+                echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG Invalid log level read from $LOG_OVERRIDE_FILE."
+            fi
+            rm $LOG_OVERRIDE_FILE
+        fi
+
+        # validate LOG_LEVEL. If it is not valid, then use DEFAULT_LOG_LEVEL instead.
+        if [[ ! "$LOG_LEVEL" =~ ^[1-5]$ ]]; then
+            echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG Invalid log level detected, will be set to $DEFAULT_LOG_LEVEL"
+            LOG_LEVEL=$DEFAULT_LOG_LEVEL
+        fi
+
+        # check if the log level for this call is equal to or higher than the set log level
+        if [ $1 -ge $LOG_LEVEL ]; then
+            # print log
+            echo "$(date +%Y-%m-%dT%H-%M-%S) $logStr ${@:2}"
+        fi
     }
 
     if ! [[ "$QUERY_TMOUT" =~ ^[0-9]+$ ]]; then
-        log ".Values.manager.healthQueryTimeout not an integer"
+        log $WARNING ".Values.manager.healthQueryTimeout not an integer"
         QUERY_TMOUT=""
     fi
 
@@ -76,7 +133,7 @@ data:
 
         while [ $CURRENT_PODS -lt $DESIRED_PODS ]; do
             sleep "$STATEFULSET_RATE"
-            log "Waiting for {{ template "vault.fullname" . }}" \
+            log $INFO "Waiting for {{ template "vault.fullname" . }}" \
                 "statefulset running pods ($CURRENT_PODS) to equal" \
                 "desired pods ($DESIRED_PODS)"
             CURRENT_PODS=$(kubectl get pods \
@@ -94,7 +151,7 @@ data:
     # working directory as cluster_keys.json - insecure.
     function initVault {
         V0=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
-        log "Initializing $V0"
+        log $INFO "Initializing $V0"
         curl -s \
         --cacert $CERT \
         --request POST \
@@ -129,7 +186,7 @@ data:
                 --data "{\"leader_api_addr\": \"https://sva-{{ template "vault.name" .}}-active.$SVCDOMAIN:8200\", \"leader_ca_cert\": \"$CA_ONELINE\"}" \
                 https://$row.$DOMAIN:8200/v1/sys/storage/raft/join)
 
-            log "$row $RAFT_STATUS"
+            log $INFO "$row $RAFT_STATUS"
             RAFT_STATUS=$(echo $RAFT_STATUS | jq -r .joined)
             sleep "$JOIN_CONVERGE_TIME"
         done
@@ -162,11 +219,13 @@ data:
         # omit counter when checking vault server state change
         old_rec="$( grep "$status_rec" "$PODREC_F" )"
         if [ $? -ne 0 ]; then
-            log "$( grep "$dns_name" $WORKDIR/pods.txt )"
-            log "Sealed status is now: $sealed"
+            log $DEBUG "$( grep "$dns_name" $WORKDIR/pods.txt )"
+            log $INFO "Sealed status of $dns_name is now: $sealed"
 
             # reread the record by hostname only
             old_rec="$( grep "^/$host/" "$PODREC_F" )"
+        else
+            log $DEBUG "There is no change in pod seal status"
         fi
 
         if [ "$sealed" != "true" ]; then
@@ -190,7 +249,7 @@ data:
 
         if [ -z "$counter" ]; then
             # sealed without a countdown: start counting
-            log "Sealed vault $host: begin unseal delay:" \
+            log $DEBUG "Sealed vault $host: begin unseal delay:" \
                 "$( expr "$STATUS_RATE" \* "$STATEMACH_START" )s"
             echo "${status_rec}${STATEMACH_START}" >> "$PODREC_TMP_F"
             return
@@ -201,7 +260,7 @@ data:
         if [ "$counter" -le 1 -o "$STATEMACH_START" -eq 0 ]; then
             # We've waited (STATUS_RATE * STATEMACH_START) seconds
             # Or, STATEMACH_START == 0 means do not delay
-            log "Unsealing $dns_name"
+            log $INFO "Unsealing $dns_name"
             unsealVault
             echo "$status_rec" >> "$PODREC_TMP_F"
             return
@@ -213,14 +272,13 @@ data:
     }
 
     function vaultInitialized {
-        echo ""
         row=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
         vaultServerStatus > $WORKDIR/healthcheck.txt
         IS_VAULT_INITIALIZED=$(cat $WORKDIR/healthcheck.txt | jq -r .initialized)
         text="$( grep $row $WORKDIR/pods.txt )"
         if [ $? -eq 0 ]; then
-            log "$text"
-            log "Initialized status is $IS_VAULT_INITIALIZED"
+            log $DEBUG "$text"
+            log $DEBUG "Initialized status is $IS_VAULT_INITIALIZED"
         fi
 
         # The empty check is here as a extra safety net, but an investigation into
@@ -239,8 +297,7 @@ data:
     # Waiting for at least one vault server, to check initialization
     waitForPods 1
 
-    echo ""
-    log "Putting a list of vault pods and ip in $WORKDIR/pods.txt"
+    log $DEBUG "Putting a list of vault pods and ip in $WORKDIR/pods.txt"
     getVaultPods
 
     vaultInitialized
@@ -252,36 +309,32 @@ data:
         # Waiting for vault servers to come up
         waitForPods $desired_pods
 
-        echo ""
-        log "Putting a list of vault pods and IPs in $WORKDIR/pods.txt"
+        log $INFO "Putting a list of vault pods and IPs in $WORKDIR/pods.txt"
         getVaultPods
 
-        log "Initializing the vault on vault-0 and" \
+        log $DEBUG "Initializing the vault on vault-0 and" \
             "storing keys in $WORKDIR/cluster_keys.json"
         initVault
         cp $WORKDIR/cluster_keys.json $WORKDIR/cluster_init.json
         #Some sleep required to allow convergence"
         sleep "$INIT_CONVERGE_TIME"
 
-        echo ""
-        log "Unsealing vault-0 using the init shards"
+        log $DEBUG "Unsealing vault-0 using the init shards"
         for row in $(awk 'NR==1{print $2}' $WORKDIR/pods.txt); do
             VAULT=$row
             unsealVault
         done
 
-        echo ""
-        log "Joining other vault servers to the HA Raft cluster"
+        log $DEBUG "Joining other vault servers to the HA Raft cluster"
         for row in $(awk 'NR>1{print $2}' $WORKDIR/pods.txt); do
-            log "$( grep $row $WORKDIR/pods.txt )"
+            log $DEBUG "$( grep $row $WORKDIR/pods.txt )"
             joinRaft
             sleep "$JOIN_RATE"
         done
 
-        echo ""
-        log "Unsealing the remaining vaults"
+        log $INFO "Unsealing the remaining vaults"
         for row in $(awk 'NR>1{print $2}' $WORKDIR/pods.txt); do
-            log "$( grep $row $WORKDIR/pods.txt )"
+            log $DEBUG "$( grep $row $WORKDIR/pods.txt )"
             VAULT=$row
             unsealVault
             sleep "$UNSEAL_RATE"
@@ -300,7 +353,7 @@ data:
 
     # Loop forever to check the seal status of vaults and
     # unseal if required
-    log "Checking vault pods seal status in perpetuity..."
+    log $INFO "Checking vault pods seal status in perpetuity..."
     while true; do
         sleep "$STATUS_RATE"
         rm $WORKDIR/pods.txt
@@ -309,7 +362,7 @@ data:
         while read host row; do
             if [ -z "$row" ]; then
                 # probably a recovering pod waiting for an IP address
-                log "pod list has empty data: [$host] [$row]"
+                log $DEBUG "pod list has empty data: [$host] [$row]"
                 continue
             fi
             vaultServerStatus $QUERY_TMOUT > $WORKDIR/healthcheck.txt

@@ -1,2 +1,3 @@
 0001-Add-vault-manager-repository-to-values.yaml.patch
 0001-Add-yaml-for-starlingx-image-handling.patch
+0001-Add-log-level-option-for-vault-manager.patch

@@ -1,0 +1,33 @@
+From dc7258b372668a7be1f6cc14a868ccef18d99f6f Mon Sep 17 00:00:00 2001
+From: Michel Thebeau <Michel.Thebeau@windriver.com>
+Date: Fri, 29 Sep 2023 21:23:19 +0000
+Subject: [PATCH] Add log level option for vault-manager
+
+Signed-off-by: Michel Thebeau <Michel.Thebeau@windriver.com>
+---
+ values.yaml | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/values.yaml b/values.yaml
+index 40f322a..41548fc 100644
+--- a/values.yaml
++++ b/values.yaml
+@@ -77,6 +77,15 @@ manager:
+   # the 'unknown' value
+   healthQueryTimeout: 2
+ 
++  # Debugging option to improve log reading, allow more verbose logging
++  #   DEBUG: 1
++  #    INFO: 2
++  # WARNING: 3
++  #   ERROR: 4
++  #   FATAL: 5
++  log:
++    defaultLogLevel: 2
++
+ injector:
+   # True if you want to enable vault agent injection.
+   # @default: global.enabled
+-- 
+2.34.1
+
