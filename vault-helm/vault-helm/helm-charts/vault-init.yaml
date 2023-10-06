@@ -9,17 +9,18 @@ data:
     CA_ONELINE=$(awk '{printf "%s\\n", $0}' $CERT)
 
     # Template vaules from helm
-    NAMESPACE={{ .Release.Namespace }}
+    VAULT_NS={{ .Release.Namespace }}
     VAULT_NAME={{ template "vault.name" .}}
-    VAULT_FULLNAME={{ template "vault.fullname" . }}
+    VAULT_FN={{ template "vault.fullname" . }}
     HA_REPLICAS={{ .Values.server.ha.replicas }}
 
     # Set the domain for resolving pod names
-    DOMAIN=$NAMESPACE.pod.cluster.local
-    SVCDOMAIN=$NAMESPACE.svc.cluster.local
+    DOMAIN="${VAULT_NS}.pod.cluster.local"
+    SVCDOMAIN="${VAULT_NS}.svc.cluster.local"
 
-    # PVC location so that keys can be persisted
-    WORKDIR=$PVCDIR
+    # impermanent location to store files while running
+    WORKDIR=/workdir
+    mkdir $WORKDIR
 
     # Trap and trap notification file. When SIGTERM is sent to this pod
     # we want to exit promptly and gracefully.
@@ -143,7 +144,7 @@ data:
     # dns names
     function getVaultPods {
         kubectl get pods \
-        -n "$NAMESPACE" \
+        -n "$VAULT_NS" \
         -l component=server,app.kubernetes.io/name=vault \
         -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\n"}{end}' \
         > $WORKDIR/pods.txt
@@ -165,9 +166,14 @@ data:
                     | wc -l)
         DESIRED_PODS=$1
 
+        if ! [[ "$CURRENT_PODS" =~ ^[0-9]+$ ]]; then
+            log $ERROR "Invalid Running pod number ($CURRENT_PODS) from kubectl get pods"
+            CURRENT_PODS=0
+        fi
+
         while [ $CURRENT_PODS -lt $DESIRED_PODS ]; do
             sleep "$STATEFULSET_RATE"
-            log $INFO "Waiting for $VAULT_FULLNAME" \
+            log $INFO "Waiting for ${VAULT_FN}" \
                 "statefulset running pods ($CURRENT_PODS) to equal" \
                 "desired pods ($DESIRED_PODS)"
             CURRENT_PODS=$(kubectl get pods \
@@ -180,22 +186,27 @@ data:
 
     # Initializes the first vault pod, only needs to be performed once
     # after deploying the helm chart
-    # Stores the root token and master key shards in plaintext in
-    # working directory as cluster_keys.json - insecure.
+    # Stores the root token and master key shards in persistent storage
     function initVault {
+        local keys
+
         V0=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
         log $INFO "Initializing $V0"
-        curl -s \
-        --cacert $CERT \
-        --request POST \
-        --data  '{"secret_shares": 5, "secret_threshold": 3}' \
-        https://$V0.$DOMAIN:8200/v1/sys/init \
-        > $WORKDIR/cluster_keys.json
+
+        keys="$(
+            curl -s \
+            --cacert $CERT \
+            --request POST \
+            --data  '{"secret_shares": 5, "secret_threshold": 3}' \
+            https://$V0.$DOMAIN:8200/v1/sys/init
+        )"
+
+        set_secret cluster-key-all /dev/stdin <<<"$keys"
     }
 
-    # Uses the master key shards in cluster_keys.json to unseal vault
+    # Uses the master key shards to unseal vault
     function unsealVault {
-        shards="$(cat $WORKDIR/cluster_keys.json | jq -r .keys_base64[])"
+        shards="$( get_secret cluster-key-all | jq -r .keys_base64[] )"
         for shard in $shards; do
             echo {\"key\": \"$shard\"} \
             | curl -s --cacert $CERT --request POST -d @- \
@@ -209,7 +220,7 @@ data:
     # joins other nodes to raft
     function joinRaft {
         CLUSTER_LEAD=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
-        ROOT_TOKEN=$(cat $WORKDIR/cluster_keys.json | jq -r .root_token)
+        ROOT_TOKEN=$( get_secret cluster-key-all | jq -r .root_token)
         local activeLink="https://sva-$VAULT_NAME-active.$SVCDOMAIN:8200"
         local dataJson="{\"leader_api_addr\": \"$activeLink\", \"leader_ca_cert\": \"$CA_ONELINE\"}"
         RAFT_STATUS=""
@@ -325,6 +336,22 @@ data:
         fi
     }
 
+    function set_secret {
+        local secret="$1"
+        local contentf="$2"
+
+        kubectl create secret generic -n "$VAULT_NS" "$secret" \
+            "--from-file=strdata=$contentf"
+    }
+
+    function get_secret {
+        local secret="$1"
+
+        kubectl get secrets -n "$VAULT_NS" "$secret" \
+            -o jsonpath='{.data.strdata}' \
+        | base64 -d
+    }
+
     #
     # LOGIC
     #
@@ -353,9 +380,9 @@ data:
         exit_on_trap 6
 
         log $DEBUG "Initializing the vault on vault-0 and" \
-            "storing keys in $WORKDIR/cluster_keys.json"
+            "storing keys in persistent storage"
         initVault
-        cp $WORKDIR/cluster_keys.json $WORKDIR/cluster_init.json
+
         #Some sleep required to allow convergence"
         sleep "$INIT_CONVERGE_TIME"
 
@@ -435,12 +462,49 @@ metadata:
   name: vault-init-unseal-2
   namespace: {{ .Release.Namespace }}
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: {{ .Release.Namespace }}
+  name: {{ template "vault.fullname" . }}-vault-manager
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["secrets"]
+  verbs: ["get", "create"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ template "vault.fullname" . }}-vault-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: {{ include "vault.chart" . }}
+    app.kubernetes.io/name: {{ include "vault.name" . }}-vault-manager
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ template "vault.fullname" . }}-vault-manager
+  namespace: {{ .Release.Namespace }}
+subjects:
+- kind: ServiceAccount
+  name: {{ template "vault.fullname" . }}-vault-manager
+roleRef:
+  kind: Role
+  name: {{ template "vault.fullname" . }}-vault-manager
+  apiGroup: rbac.authorization.k8s.io
+---
 {{- if and (eq (.Values.injector.enabled | toString) "true" ) (eq (.Values.global.enabled | toString) "true") }}
 # Deployment for the unsealer
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ template "vault.fullname" . }}-manager
+  name: {{ template "vault.fullname" . }}-manager2
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: {{ include "vault.name" . }}-manager
@@ -464,7 +528,7 @@ spec:
           {{- toYaml .Values.manager.extraLabels | nindent 8 -}}
         {{- end }}
     spec:
-      serviceAccountName: "{{ template "vault.fullname" . }}"
+      serviceAccountName: "{{ template "vault.fullname" . }}-vault-manager"
       {{- if .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.global.imagePullSecrets | nindent 8 }}
@@ -481,16 +545,11 @@ spec:
             - bash
             - /opt/script/init.sh
           env:
-          - name: PVCDIR
-            value: /mnt/data
           - name: CA_CERT
             value: /mnt/data/ca/tls.crt
           volumeMounts:
             - name: vault-init-unseal-2
               mountPath: /opt/script
-              readOnly: false
-            - name: manager-pvc
-              mountPath: /mnt/data
               readOnly: false
             - name: vault-ca
               mountPath: /mnt/data/ca
@@ -502,13 +561,4 @@ spec:
         - name: vault-ca
           secret:
             secretName: vault-ca
-  volumeClaimTemplates:
-    - metadata:
-        name: manager-pvc
-      spec:
-        accessModes:
-          - ReadWriteOnce
-        resources:
-          requests:
-            storage: 1Gi
 {{ end }}
