@@ -15,6 +15,11 @@ data:
     # PVC location so that keys can be persisted
     WORKDIR=$PVCDIR
 
+    # Trap and trap notification file. When SIGTERM is sent to this pod
+    # we want to exit promptly and gracefully.
+    TRAPFILE=$WORKDIR/exit_on_trap
+    trap "touch $TRAPFILE" SIGTERM
+
     # Records for seal status state machine:
     PODREC_F="$WORKDIR/previous_pods_status.txt"
     PODREC_TMP_F="$WORKDIR/new_pods_status.txt"
@@ -106,6 +111,24 @@ data:
         log $WARNING ".Values.manager.healthQueryTimeout not an integer"
         QUERY_TMOUT=""
     fi
+
+    function exit_on_trap {
+        local tfnum=""
+
+        if [ -e "$TRAPFILE" ]; then
+            tfnum=$(cat $TRAPFILE)
+            log $DEBUG "removing $TRAPFILE"
+            rm "$TRAPFILE" # for workdir on PVC
+            if [ -n "$tfnum" ] && [ "$tfnum" -eq $1 ]; then
+                log $DEBUG "Exit on trap SIGTERM on call $1"
+                exit
+            else
+                log $DEBUG "tfnum of $tfnum does not match with call number $1"
+            fi
+        else
+            log $DEBUG "exit_on_trap call $1 reached. no trapfile found"
+        fi
+    }
 
     # Creates a list of all k8s vault pods and stores in text file.
     # Converts ips from X.X.X.X or a:b:c::d to X-X-X-X for use as pod
@@ -293,24 +316,29 @@ data:
     #
     # LOGIC
     #
+    exit_on_trap 1
 
     # Waiting for at least one vault server, to check initialization
     waitForPods 1
+    exit_on_trap 2
 
     log $DEBUG "Putting a list of vault pods and ip in $WORKDIR/pods.txt"
     getVaultPods
+    exit_on_trap 3
 
     vaultInitialized
     IS_VAULT_INITIALIZED=$?
     if [ $IS_VAULT_INITIALIZED -eq 1 ]; then
-
+        exit_on_trap 4
         desired_pods={{ .Values.server.ha.replicas }}
 
         # Waiting for vault servers to come up
         waitForPods $desired_pods
+        exit_on_trap 5
 
         log $INFO "Putting a list of vault pods and IPs in $WORKDIR/pods.txt"
         getVaultPods
+        exit_on_trap 6
 
         log $DEBUG "Initializing the vault on vault-0 and" \
             "storing keys in $WORKDIR/cluster_keys.json"
@@ -332,15 +360,18 @@ data:
             sleep "$JOIN_RATE"
         done
 
+        exit_on_trap 7
         log $INFO "Unsealing the remaining vaults"
         for row in $(awk 'NR>1{print $2}' $WORKDIR/pods.txt); do
             log $DEBUG "$( grep $row $WORKDIR/pods.txt )"
             VAULT=$row
             unsealVault
             sleep "$UNSEAL_RATE"
+            exit_on_trap 8
         done
     fi
 
+    exit_on_trap 9
     # initialize the state machine - vault server status records
     echo "" > "$PODREC_F"
     while read host dns_name; do
@@ -355,10 +386,13 @@ data:
     # unseal if required
     log $INFO "Checking vault pods seal status in perpetuity..."
     while true; do
+        exit_on_trap 10
         sleep "$STATUS_RATE"
         rm $WORKDIR/pods.txt
         echo "" > "$PODREC_TMP_F"
+        exit_on_trap 11
         getVaultPods
+        exit_on_trap 12
         while read host row; do
             if [ -z "$row" ]; then
                 # probably a recovering pod waiting for an IP address
@@ -368,9 +402,11 @@ data:
             vaultServerStatus $QUERY_TMOUT > $WORKDIR/healthcheck.txt
             TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .sealed)
 
+            exit_on_trap 13
             # Decide when to unseal the vault server; includes
             # Adding records to new_pods_status.txt
             runStateMachine "$host" "$row" "$TEMP"
+            exit_on_trap 14
         done <$WORKDIR/pods.txt
         mv "$PODREC_TMP_F" "$PODREC_F"
     done
