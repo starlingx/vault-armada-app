@@ -8,9 +8,15 @@ data:
     # Store cert as a oneliner for curl purposes
     CA_ONELINE=$(awk '{printf "%s\\n", $0}' $CERT)
 
+    # Template vaules from helm
+    NAMESPACE={{ .Release.Namespace }}
+    VAULT_NAME={{ template "vault.name" .}}
+    VAULT_FULLNAME={{ template "vault.fullname" . }}
+    HA_REPLICAS={{ .Values.server.ha.replicas }}
+
     # Set the domain for resolving pod names
-    DOMAIN={{ .Release.Namespace }}.pod.cluster.local
-    SVCDOMAIN={{ .Release.Namespace }}.svc.cluster.local
+    DOMAIN=$NAMESPACE.pod.cluster.local
+    SVCDOMAIN=$NAMESPACE.svc.cluster.local
 
     # PVC location so that keys can be persisted
     WORKDIR=$PVCDIR
@@ -89,14 +95,16 @@ data:
                 LOG_LEVEL=$newLogLevel
                 echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG Log level set to $logStr"
             else
-                echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG Invalid log level read from $LOG_OVERRIDE_FILE."
+                echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG"\
+                     "Invalid log level read from $LOG_OVERRIDE_FILE."
             fi
             rm $LOG_OVERRIDE_FILE
         fi
 
         # validate LOG_LEVEL. If it is not valid, then use DEFAULT_LOG_LEVEL instead.
         if [[ ! "$LOG_LEVEL" =~ ^[1-5]$ ]]; then
-            echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG Invalid log level detected, will be set to $DEFAULT_LOG_LEVEL"
+            echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG" \
+                 "Invalid log level detected, will be set to $DEFAULT_LOG_LEVEL"
             LOG_LEVEL=$DEFAULT_LOG_LEVEL
         fi
 
@@ -135,7 +143,7 @@ data:
     # dns names
     function getVaultPods {
         kubectl get pods \
-        -n {{ .Release.Namespace }} \
+        -n "$NAMESPACE" \
         -l component=server,app.kubernetes.io/name=vault \
         -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\n"}{end}' \
         > $WORKDIR/pods.txt
@@ -146,23 +154,25 @@ data:
     # Wait for the vault servers in the stateful set to be
     # created before initializing
     function waitForPods {
+        local jsonPath='{range .items[*]}{.metadata.name}{"\t"} \
+        {.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
+        {end}'
+
         CURRENT_PODS=$(kubectl get pods \
                     -l component=server,app.kubernetes.io/name=vault \
-                    -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
-                    {end}' \
+                    -o=jsonpath="$jsonPath" \
                     | grep Running \
                     | wc -l)
         DESIRED_PODS=$1
 
         while [ $CURRENT_PODS -lt $DESIRED_PODS ]; do
             sleep "$STATEFULSET_RATE"
-            log $INFO "Waiting for {{ template "vault.fullname" . }}" \
+            log $INFO "Waiting for $VAULT_FULLNAME" \
                 "statefulset running pods ($CURRENT_PODS) to equal" \
                 "desired pods ($DESIRED_PODS)"
             CURRENT_PODS=$(kubectl get pods \
                 -l component=server,app.kubernetes.io/name=vault \
-                -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
-                {end}' \
+                -o=jsonpath="$jsonPath" \
                 | grep Running \
                 | wc -l)
         done
@@ -200,13 +210,15 @@ data:
     function joinRaft {
         CLUSTER_LEAD=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
         ROOT_TOKEN=$(cat $WORKDIR/cluster_keys.json | jq -r .root_token)
+        local activeLink="https://sva-$VAULT_NAME-active.$SVCDOMAIN:8200"
+        local dataJson="{\"leader_api_addr\": \"$activeLink\", \"leader_ca_cert\": \"$CA_ONELINE\"}"
         RAFT_STATUS=""
         while [ "$RAFT_STATUS" != "true" ]; do
             RAFT_STATUS=$(curl -s \
                 --cacert $CERT \
                 -H "X-Vault-Token: $ROOT_TOKEN" \
                 --request POST \
-                --data "{\"leader_api_addr\": \"https://sva-{{ template "vault.name" .}}-active.$SVCDOMAIN:8200\", \"leader_ca_cert\": \"$CA_ONELINE\"}" \
+                --data "$dataJson" \
                 https://$row.$DOMAIN:8200/v1/sys/storage/raft/join)
 
             log $INFO "$row $RAFT_STATUS"
@@ -330,7 +342,7 @@ data:
     IS_VAULT_INITIALIZED=$?
     if [ $IS_VAULT_INITIALIZED -eq 1 ]; then
         exit_on_trap 4
-        desired_pods={{ .Values.server.ha.replicas }}
+        desired_pods=$HA_REPLICAS
 
         # Waiting for vault servers to come up
         waitForPods $desired_pods
