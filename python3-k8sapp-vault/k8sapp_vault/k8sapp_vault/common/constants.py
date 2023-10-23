@@ -17,3 +17,5 @@ HELM_VAULT_MANAGER_POD = 'manager'
 HELM_VAULT_INJECTOR_POD = 'injector'
 
 HELM_CHART_COMPONENT_LABEL = 'app.starlingx.io/component'
+
+KEYSHARDS = 5

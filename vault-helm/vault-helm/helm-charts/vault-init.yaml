@@ -31,6 +31,22 @@ data:
     # reserve trap '0' for disabling a debugging trap request
     DEBUGGING_TRAP=0
 
+    # Maximum sleep seconds for mount-helper before exiting
+    MOUNT_HELPER_MAX_TIME=60
+
+    # Maximum seconds to wait for mount-helper pod to start
+    MAX_POD_RUN_TRIES=10
+
+    # Maximum seconds to wait for vault-manager pod to exit
+    # Vault-manager is not responding to SIGTERM, so will take 30
+    # seconds
+    TERMINATE_TRIES_MAX=6
+    TERMINATE_TRIES_SLEEP=5
+
+    # Vault key share configuration
+    KEY_SECRET_SHARES=5
+    KEY_REQUIRED_THRESHOLD=3
+
     # Records for seal status state machine:
     PODREC_F="$WORKDIR/previous_pods_status.txt"
     PODREC_TMP_F="$WORKDIR/new_pods_status.txt"
@@ -69,9 +85,6 @@ data:
     DEFAULT_LOG_LEVEL=$INFO
     LOG_LEVEL={{ .Values.manager.log.defaultLogLevel }}
     LOG_OVERRIDE_FILE="$WORKDIR/log_level"
-
-    # Number of key shards
-    KEY_SECRET_SHARES=5
 
     # FUNCTIONS
 
@@ -217,7 +230,10 @@ data:
         rm -f "$WORKDIR"/s1 "$WORKDIR"/s2
     }
 
-    # validation function for splitShard
+    # Check the structure of json data and confirm equivalence of
+    # the stdin with stored secrets
+    #
+    # Returns the normal linux success=0, failure!=0
     function validateSecrets {
         local index
         local text
@@ -234,6 +250,8 @@ data:
         keys=$( echo "$text" | jq '.keys' )
         keys_base64=$( echo "$text" | jq '.keys_base64' )
         root_token=$( echo "$text" | jq -r '.root_token' )
+        # response is 'null' if the dict key is missing
+        # response is empty (-z) is the source document is empty
         if [ -z "$keys" -o "$keys" == "null" \
                 -o -z "$keys_base64" -o "$keys_base64" == "null" \
                 -o -z "$root_token" -o "$root_token" == "null" ]; then
@@ -242,14 +260,22 @@ data:
         fi
 
         count=$( echo "$keys" | jq '. | length' )
+        if [ $? -ne 0 ]; then
+            log $ERROR "jq did not parse keys length"
+            return 1
+        fi
         if [ -z "$count" ] || [ "$count" -ne "$KEY_SECRET_SHARES" ]; then
-            log $ERROR "Incorrect array length for keys: " \
+            log $ERROR "Incorrect array length for keys:" \
                 "$count instead of $KEY_SECRET_SHARES"
             return 1
         fi
         count=$( echo "$keys_base64" | jq '. | length' )
+        if [ $? -ne 0 ]; then
+            log $ERROR "jq did not parse keys_base64 length"
+            return 1
+        fi
         if [ -z "$count" ] || [ "$count" -ne "$KEY_SECRET_SHARES" ]; then
-            log $ERROR "Incorrect array length for keys_base64: " \
+            log $ERROR "Incorrect array length for keys_base64:" \
                 "$count instead of $KEY_SECRET_SHARES"
             return 1
         fi
@@ -267,6 +293,9 @@ data:
         root_saved="$( get_secret cluster-key-root )"
         saved=$( echo "$saved" | jq \
             -c '{keys: .keys, keys_base64: .keys_base64, root_token: "'$root_saved'"}' )
+
+        # finally ensure that the saved secrets are the same as the
+        # supplied text
         shaA=$( echo "$text" | sha256sum )
         shaB=$( echo "$saved" | sha256sum )
         if [ "$shaA" != "$shaB" ]; then
@@ -274,7 +303,7 @@ data:
             return 1
         fi
 
-        log $INFO "Verified creation of secret"
+        log $INFO "Verified stored secrets are the same as supplied data"
         return 0
     }
 
@@ -323,25 +352,44 @@ data:
         done
     }
 
+    # Takes the json document output from vault initialization
+    # and stores it into secrets for key shards and the root token
+    #
+    # This only works if the secrets are not pre-existing.  An error
+    # is printed by set_secrets.
+    function storeVaultInitSecrets {
+        local secrets="$1"
+        local index
+        local split_json
+
+        for index in $(seq 0 $((KEY_SECRET_SHARES - 1 ))); do
+            split_json=$( echo -n "$secrets" | splitShard "$index" )
+            set_secret "cluster-key-$index" /dev/stdin <<< "$split_json"
+        done
+
+        split_json=$( echo "$secrets" | jq -r '.root_token' )
+        set_secret "cluster-key-root" /dev/stdin <<< "$split_json"
+    }
+
     # Initializes the first vault pod, only needs to be performed once
     # after deploying the helm chart
     # Stores the root token and master key shards in k8s secrets
     function initVault {
+        local V0
         local keys
-        local index
-        local split_json
-        local secret_json
         local key_error
+        local shares
+        local threshold
 
         V0=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
         log $INFO "Initializing $V0"
-        secret_json="{\"secret_shares\": $KEY_SECRET_SHARES, \"secret_threshold\": 3}"
-
+        shares='"secret_shares": '$KEY_SECRET_SHARES
+        threshold='"secret_threshold": '$KEY_REQUIRED_THRESHOLD
         keys=$(
             curl -s \
             --cacert $CERT \
             --request POST \
-            --data "$secret_json" \
+            --data "{$shares, $threshold}" \
             https://$V0.$DOMAIN:8200/v1/sys/init
         )
         key_error=$(echo -n "$keys"| jq -r '.errors[]?')
@@ -349,15 +397,9 @@ data:
             log $ERROR "vault init request failed: $key_error"
         fi
 
-        for index in $(seq 0 $((KEY_SECRET_SHARES - 1 ))); do
-            split_json=$( echo -n "$keys" | splitShard "$index" )
-            set_secret "cluster-key-$index" /dev/stdin <<< "$split_json"
-        done
+        storeVaultInitSecrets "$keys"
 
-        split_json=$( echo "$keys" | jq -r '.root_token' )
-        set_secret "cluster-key-root" /dev/stdin <<< "$split_json"
-
-        # validation if the split and store secrets is identical to the original pulled.
+        # check if the secrets match vault's REST API response
         echo "$keys" | validateSecrets
     }
 
@@ -506,9 +548,17 @@ data:
     function set_secret {
         local secret="$1"
         local contentf="$2"
+        local output
+        local result
 
-        kubectl create secret generic -n "$VAULT_NS" "$secret" \
-            "--from-file=strdata=$contentf"
+        output="$( kubectl create secret generic -n "$VAULT_NS" \
+            "$secret" "--from-file=strdata=$contentf" 2>&1 )"
+        result=$?
+        if [ "$result" -ne 0 ]; then
+            log $ERROR "Failed to create secret $secret"
+            log $DEBUG "Output: [$output]"
+        fi
+        return $result
     }
 
     function get_secret {
@@ -519,10 +569,409 @@ data:
         | base64 -d
     }
 
+    # When vault-manager is run in "MOUNT_HELPER" mode, this function
+    # will not return. Instead the function will exit_on_trap or exit
+    # when it times-out.
+    #
+    # Basically: this function doesn't do anything except wait to be
+    # terminated.
+    #
+    # Vault-manager in MOUNT_HELPER has PVC mounted, allowing the real
+    # vault-manager to read secrets from cluster_keys.json
+    function mountHelper {
+        local count
+
+        # omit this function if this pod is not the mount helper
+        if [ -z "$MANAGER_MODE" -o "$MANAGER_MODE" != "MOUNT_HELPER" ]; then
+            log $INFO "Mode is VAULT_MANAGER"
+            return
+        fi
+
+        # When vault-manager is running in this mode, it should be
+        # deleted by vault-manager running in the default mode, which
+        # is using this pod to read secrets from mounted PVC
+        log $INFO "Mode is $MANAGER_MODE"
+
+        # start with some debug/error logs
+        if [ -f "$PVC_DIR/cluster_keys.json" ]; then
+            log $DEBUG "Successfully mounted secrets file"
+        else
+            log $WARNING "Secrets file not found"
+        fi
+
+        # sleep for MOUNT_HELPER_MAX_TIME, expecting SIGTERM signal
+        log $INFO "Waiting for termination request via SIGTERM"
+        count=0
+        while [ "$count" -lt "$MOUNT_HELPER_MAX_TIME" ]; do
+            exit_on_trap
+            count=$((count+1))
+            sleep 1
+        done
+
+        # Normally should exit by exit_on_trap, but here we timeout
+        # waiting for the real vault-manager to delete this job/pod.
+        log $INFO "Exiting without receiving SIGTERM request"
+        exit 0
+    }
+
+    # Check if a secret exists
+    #
+    # Returns the normal linux success=0, failure!=0
+    # Prints the name of the secret
+    function secretExists {
+        local name="$1"
+        kubectl get secrets -n vault "$name" \
+            -o jsonpath='{.metadata.name}' 2>/dev/null \
+        | grep "$name"
+    }
+
+    # Check if the PVC resource exists
+    #
+    # Returns the normal linux success=0, failure!=0
+    # Prints the name of the PVC resource
+    function pvcExists {
+        local text
+        local jqscript
+
+        jqscript='.items
+            | map(select(.metadata.name | test("^manager-pvc")))
+            | .[0].metadata.name'
+
+        # using jq since kubernetes does not support regex
+        # the grep makes sure the result contains the 'manager-pvc'
+        # string (as opposed to 'null' for example)
+        text="$(
+            kubectl get persistentvolumeclaims -n vault -o json \
+            | jq -r "$jqscript" 2>/dev/null \
+            | grep manager-pvc )"
+        result=$?
+
+        if [ -n "$text" ]; then
+            echo "$text"
+        fi
+
+        return $result
+    }
+
+    # Check if the PVC is mounted to any pod in vault namespace
+    #
+    # Returns the normal linux success=0, failure!=0
+    # Prints the name of the PVC resource
+    function testPVCMount {
+        local result
+        local cspec
+        local vspec
+
+        cspec=".items[*].spec.containers[*]"
+        vspec="volumeMounts[?(@.name=='manager-pvc')].name"
+
+        # this kubectl query returns zero whether manager-pvc is
+        # found or not
+        # result variable is either empty or 'manager-pvc'
+        result="$( kubectl get pods -n vault \
+            -o jsonpath="{${cspec}.${vspec}}" )"
+
+        if [ -n "$result" ]; then
+            return 0
+        fi
+        return 1 # assertion 'fails'
+    }
+
+    # This function prints a DEBUG log of kubectl delete
+    function deleteMountHelper {
+        local text
+        local result
+
+        log $DEBUG "Waiting for delete of mount-helper job"
+        text="$( kubectl delete --ignore-not-found=true --wait=true \
+                -f /opt/yaml/pvc-attach.yaml 2>&1 )"
+        result=$?
+        log $DEBUG "Output of deleting mount-helper: [$text]"
+        return $result
+    }
+
+    # Run shred on the file content of PVC
+    #
+    # All files a shredded, and the result is an error if
+    #   - command return code is non-zero
+    #   - file comparison shows unchanged file(s)
+    #
+    # A warning is issued if shred/kubectl command has any stdout or
+    # stderr
+    #
+    # Returns the normal linux success=0, failure!=0
+    function securelyWipePVC {
+        local helper="$1"
+
+        if [ -z "$helper" ]; then
+            log $ERROR "No pod specified for shredding"
+            return 1
+        fi
+
+        # get profile of the files before shredding
+        kubectl exec -n vault "$helper" -- \
+            bash -c 'find /mnt/data -type f \
+                | sort | xargs wc | head -n-1' \
+            >/tmp/shred_before.txt 2>&1
+        log $DEBUG "Original files: [$( cat /tmp/shred_before.txt )]"
+
+        # run the shred command
+        #
+        # Shred all the files in mounted /mnt/data/
+        #
+        # The shred by default has three randomized passes, and with -z
+        # option will finalize with zeros.  -f prompts shred to work
+        # around any unexpected file permissions
+        text="$( kubectl exec -n vault "$helper" -- \
+            bash -c '\
+                result=0; \
+                while read fname; do \
+                    shred -f -z "$fname"; \
+                    [ $? -ne 0 ] && result=1; \
+                done <<<"$(find /mnt/data -type f )"; \
+                exit $result' 2>&1 )"
+        result=$?
+
+        # get profile of the files after shredding
+        kubectl exec -n vault "$helper" -- \
+            bash -c 'find /mnt/data -type f \
+                | sort | xargs wc | head -n-1' \
+            >/tmp/shred_after.txt 2>&1
+        log $DEBUG "Shredded files: [$( cat /tmp/shred_after.txt )]"
+
+        # compare the profiles for error reporting
+        #
+        # If the file lists, pushed through wc, have files with the same
+        # character, word, and line counts then report an error: a file
+        # has not been shred
+        #
+        # Ignore files that were empty
+        difftext="$( diff -wuU100000 /tmp/shred_before.txt \
+            /tmp/shred_after.txt )"
+        unchanged="$( echo "$difftext" | grep "^ " \
+            | grep -v "^\([ ]\{1,\}0\)\{3\} /" )"
+
+        # Report the errors/success
+        if [ "$result" -ne 0 ]; then
+            log $ERROR "Error on shred: [$text]"
+            if [ -n "$unchanged" ]; then
+                log $ERROR "Unchanged: [$unchanged]"
+            fi
+            return 1
+        fi
+        if [ -n "$text" ]; then
+            log $WARNING "Output of shred is not empty: [$text]"
+        fi
+        if [ -n "$unchanged" ]; then
+            log $ERROR "Shred did not shred some files"
+            log $ERROR "Unchanged: [$unchanged]"
+            return 1
+        fi
+
+        log $INFO "Shredding of PVC data verified"
+
+        return 0
+    }
+
+    # Delete the PVC resource
+    #
+    # The delete will succeed even if attached to a pod, such as a
+    # terminating vault-manager or mount-helper - the PVC remains
+    # in terminating status until the pod is also terminated.
+    function deletePVC {
+        local text
+        local name
+
+        name="$( pvcExists )"
+        if [ $? -eq 0 ] && [[ "$name" =~ ^manager-pvc ]]; then
+            text="$( kubectl delete persistentvolumeclaims -n vault \
+                "$name" 2>&1 )"
+            if [ $? -ne 0 ]; then
+                log $ERROR "Error deleting PVC: [$text]"
+            else
+                log $INFO "$text"
+            fi
+        else
+            log $WARNING "Request to delete PVC but PVC not found"
+        fi
+    }
+
+    # Delete the bootstrap secret
+    function deleteBootstrap {
+        local text
+        text="$( kubectl delete secrets -n vault \
+            cluster-key-bootstrap 2>&1 )"
+        if [ $? -ne 0 ]; then
+            log $ERROR "Error deleting bootstrap secret: [$text]"
+        else
+            log $INFO "$text"
+        fi
+    }
+
+    # Run a job/pod, to mount the PVC resource, and retrieve the secrets
+    # from PVC.
+    #
+    # See also the function mountHelper and the ConfigMap named:
+    #     {{ include "vault.name" . }}-mount-helper
+    #
+    # This function does not support overwriting an existing
+    # cluster-key-* secret, but it does support validating those secrets
+    # if they exist
+    function convertPVC {
+        local output
+        local pod
+        local count
+        local text
+        local PVCtext
+        local result
+
+        if testPVCMount; then
+            log $ERROR "Cannot mount PVC already mounted"
+            return 1
+        fi
+
+        # run the pod
+        output="$( kubectl apply -f /opt/yaml/pvc-attach.yaml 2>&1 )"
+        if [ $? -ne 0 ]; then
+            log $ERROR "Failed to apply mount-helper"
+            log $DEBUG "Output: [$output]"
+            deleteMountHelper
+            return 1
+        fi
+
+        # wait for pod
+        pod=''
+        count=0
+        log $INFO "Waiting for mount-helper pod to run"
+        while [ -z "$pod" -a "$count" -le "$MAX_POD_RUN_TRIES"  ]; do
+            count=$((count+1))
+            text="$( kubectl get pods -n vault | grep "mount-helper" )"
+            pod="$( echo "$text" | grep "Running" | awk '{print $1}' )"
+            if [ -z "$pod" ]; then
+                sleep 1
+            fi
+        done
+
+        if [ -z "$pod" ]; then
+            log $ERROR "Failed to run mount-helper pod"
+            log $DEBUG "Pod state: [$( echo $text )]"
+            deleteMountHelper
+            return 1
+        fi
+
+        # get the pvc data
+        PVCtext="$( kubectl exec -n vault "$pod" \
+                    -- cat /mnt/data/cluster_keys.json )"
+        if [ $? -ne 0 -o -z "$PVCtext" ]; then
+            log $ERROR "Failed to read cluster_keys.json"
+            deleteMountHelper
+            return 1
+        fi
+        log $INFO "Data retrieved from PVC"
+
+        # if the Root secret is pre-existing, compare the existing
+        # shard secrets and root secret before deleting the PVC
+        kubectl get secrets -n vault cluster-key-root >/dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            log $INFO "Cluster secrets exist:" \
+                "validating"
+        else
+            # create a secret from the data
+            storeVaultInitSecrets "$PVCtext"
+        fi
+
+        # verify the data stored versus text from PVC
+        echo "$PVCtext" | validateSecrets
+        result=$?
+        if [ "$result" -eq 0 ]; then
+            securelyWipePVC "$pod"
+            # omit deleting the PVC for manual analysis and shred
+            # when the wipe fails
+            if [ $? -eq 0 ]; then
+                deletePVC
+            fi
+        fi
+
+        # clean up but do not care about the result
+        deleteMountHelper
+
+        return $result
+    }
+
+    function convertBootstrapSecrets {
+        local text
+        local count
+
+        text="$( get_secret cluster-key-bootstrap )"
+        storeVaultInitSecrets "$text"
+
+        # verify the split secrets versus the bootstrap text
+        echo "$text" | validateSecrets
+        if [ $? -ne 0 ]; then
+            # an error is already printed
+            return 1
+        fi
+
+        deleteBootstrap
+
+        # Also validate and delete the PVC resource
+        # This procedure depends on waiting for the old version
+        # of vault-manager pod to exit
+        count="$TERMINATE_TRIES_MAX"
+        log $INFO "Waiting for vault-manager pod to exit"
+        while testPVCMount && [ "$count" -gt 0 ]; do
+            sleep "$TERMINATE_TRIES_SLEEP"
+            count=$((count-1))
+        done
+
+        convertPVC
+    }
+
+    function runConversion {
+        if [ -n "$K8S_SECRETS_PREEXIST" ]; then
+            log $INFO "Cluster secrets exist"
+            return
+        elif [ -n "$BOOTSTRAP_PREEXISTS" ]; then
+            # this is the normal application update procedure; the
+            # lifecycle code retrieved the secrets from previous version
+            # of the application.
+            log $INFO "Using secrets provided in $BOOTSTRAP_PREEXISTS"
+            convertBootstrapSecrets
+            return
+        elif [ -z "$PVC_PREEXISTS" ]; then
+            log $INFO "No pre-existing secrets exist"
+            return
+        fi
+
+        # Finally, read the pre-existing PVC. This occurs if the
+        # application updates outside of application-update.  For
+        # example if the old application is removed and deleted, and the
+        # new application is uploaded and applied.
+        convertPVC
+    }
+
+
     #
     # LOGIC
     #
     exit_on_trap 1
+
+    # check if this pod is helping to convert storage from pvc to k8s
+    # secrets
+    mountHelper
+    exit_on_trap 15
+
+    # check if there are existing key shard secrets, boot strap secret,
+    # or pre-existing resource
+    K8S_SECRETS_PREEXIST="$( secretExists cluster-key-root )"
+    exit_on_trap 16
+    BOOTSTRAP_PREEXISTS="$( secretExists cluster-key-bootstrap )"
+    exit_on_trap 17
+    PVC_PREEXISTS="$( pvcExists )"
+    exit_on_trap 18
+
+    runConversion
+    exit_on_trap 19
 
     # Waiting for at least one vault server, to check initialization
     waitForPods 1
@@ -575,6 +1024,8 @@ data:
             sleep "$UNSEAL_RATE"
             exit_on_trap 8
         done
+    else
+        log $INFO "Vault is initialized"
     fi
 
     exit_on_trap 9
@@ -629,6 +1080,71 @@ metadata:
   name: vault-init-unseal-2
   namespace: {{ .Release.Namespace }}
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  managedFields:
+  - apiVersion: v1
+    fieldsType: FieldsV1
+    fieldsV1:
+      f:data:
+        .: {}
+        f:pvc-attach.yaml: {}
+    manager: {{ include "vault.name" . }}-mount-helper
+  name: {{ include "vault.name" . }}-mount-helper
+  namespace: {{ .Release.Namespace }}
+data:
+  pvc-attach.yaml: |
+    ---
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: {{ template "vault.fullname" . }}-mount-helper
+      namespace: vault
+    spec:
+      activeDeadlineSeconds: 600
+      completions: 1
+      parallelism: 1
+      ttlSecondsAfterFinished: 0
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: "{{ template "vault.fullname" . }}-vault-manager"
+          {{- if .Values.global.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml .Values.global.imagePullSecrets | nindent 12 }}
+          {{- end }}
+          {{- if .Values.manager.tolerations }}
+          tolerations:
+            {{- tpl .Values.manager.tolerations . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: mount
+              image: "{{ .Values.manager.image.repository }}:{{ .Values.manager.image.tag }}"
+              imagePullPolicy: "{{ .Values.injector.image.pullPolicy }}"
+              args:
+                - bash
+                - /opt/script/init.sh
+              env:
+              - name: MANAGER_MODE
+                value: MOUNT_HELPER
+              - name: PVC_DIR
+                value: /mnt/data
+              volumeMounts:
+                - name: mount-helper
+                  mountPath: /opt/script
+                  readOnly: true
+                - name: manager-pvc
+                  mountPath: /mnt/data
+                  readOnly: false
+          volumes:
+          - name: mount-helper
+            configMap:
+              name: vault-init-unseal-2
+          - name: manager-pvc
+            persistentVolumeClaim:
+              claimName: manager-pvc-sva-vault-manager-0
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -639,8 +1155,17 @@ rules:
   resources: ["pods"]
   verbs: ["get", "watch", "list"]
 - apiGroups: [""] # "" indicates the core API group
+  resources: ["pods/exec"]
+  verbs: ["create"]
+- apiGroups: [""] # "" indicates the core API group
   resources: ["secrets"]
-  verbs: ["get", "create"]
+  verbs: ["get", "create", "delete"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "create", "delete"]
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["persistentvolumeclaims"]
+  verbs: ["list", "delete"]
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -718,6 +1243,9 @@ spec:
             - name: vault-init-unseal-2
               mountPath: /opt/script
               readOnly: false
+            - name: mount-helper-yaml
+              mountPath: /opt/yaml
+              readOnly: true
             - name: vault-ca
               mountPath: /mnt/data/ca
               readOnly: true
@@ -725,6 +1253,9 @@ spec:
         - name: vault-init-unseal-2
           configMap:
             name: vault-init-unseal-2
+        - name: mount-helper-yaml
+          configMap:
+            name: {{ include "vault.name" . }}-mount-helper
         - name: vault-ca
           secret:
             secretName: vault-ca
