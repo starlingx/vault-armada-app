@@ -27,6 +27,10 @@ data:
     TRAPFILE=$WORKDIR/exit_on_trap
     trap "touch $TRAPFILE" SIGTERM
 
+    # when specifying a trap for debug, remember it with this variable
+    # reserve trap '0' for disabling a debugging trap request
+    DEBUGGING_TRAP=0
+
     # Records for seal status state machine:
     PODREC_F="$WORKDIR/previous_pods_status.txt"
     PODREC_TMP_F="$WORKDIR/new_pods_status.txt"
@@ -122,20 +126,42 @@ data:
     fi
 
     function exit_on_trap {
+        local trap="$1"
         local tfnum=""
 
         if [ -e "$TRAPFILE" ]; then
             tfnum=$(cat $TRAPFILE)
-            log $DEBUG "removing $TRAPFILE"
+            log $DEBUG "exit_on_trap: removing $TRAPFILE"
             rm "$TRAPFILE" # for workdir on PVC
-            if [ -n "$tfnum" ] && [ "$tfnum" -eq $1 ]; then
-                log $DEBUG "Exit on trap SIGTERM on call $1"
+            if [ -z "$tfnum" ]; then
+                # an empty trap file is the default expected behaviour
+                log $INFO "exit_on_trap: ($trap)"
                 exit
+            # handle trap debugging feature - a developer specifies the
+            # trap number to target a specific exit_on_trap call.
+            # Setting a value of 0 (zero) disables the debugging trap
+            elif [ "$tfnum" -eq 0 ]; then
+                log $DEBUG "exit_on_trap: ($trap):" \
+                    "disable debug trap ($DEBUGGING_TRAP)"
+                DEBUGGING_TRAP=0
+                # there is no trap with value zero
+                return
             else
-                log $DEBUG "tfnum of $tfnum does not match with call number $1"
+                DEBUGGING_TRAP="$tfnum"
+                log $DEBUG "exit_on_trap: ($trap): " \
+                    "enable debug trap ($DEBUGGING_TRAP)"
+                # check now just in case it matches
+                if [ "$DEBUGGING_TRAP" -eq "$trap" ]; then
+                    log $INFO "exit_on_trap: ($trap): matching"
+                    exit
+                fi
             fi
+        # check if there is a matching debug trap set
+        elif [ "$DEBUGGING_TRAP" -eq "$trap" ]; then
+            log $INFO "exit_on_trap: ($trap): matching"
+            exit
         else
-            log $DEBUG "exit_on_trap call $1 reached. no trapfile found"
+            log $DEBUG "exit_on_trap: ($trap): no trap file, no exit"
         fi
     }
 
