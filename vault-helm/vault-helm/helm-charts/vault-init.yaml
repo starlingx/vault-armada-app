@@ -70,6 +70,9 @@ data:
     LOG_LEVEL={{ .Values.manager.log.defaultLogLevel }}
     LOG_OVERRIDE_FILE="$WORKDIR/log_level"
 
+    # Number of key shards
+    KEY_SECRET_SHARES=5
+
     # FUNCTIONS
 
     # Convert log level to text for log message
@@ -183,6 +186,98 @@ data:
         fi
     }
 
+    # splits keys into separate files. Each file contains the key and the base64 encoded version.
+    # root token will be stored separately
+
+    function splitShard {
+        local index="$1"
+        jq '{"keys": [.keys['$index']], "keys_base64": [.keys_base64['$index']]}'
+    }
+
+    # merges two split keys
+    function mergeKeyJson {
+        # the two parameters are names for variables
+        local jstr1="$1"
+        local jstr2="$2"
+
+        mkfifo "$WORKDIR"/s1
+        mkfifo "$WORKDIR"/s2
+
+        (
+        jq -Mn --argfile file1 $WORKDIR/s1 --argfile file2 $WORKDIR/s2 '
+            def mergek: ($file1, $file2) | .keys as $k | $k;
+            def mergeb: ($file1, $file2) | .keys_base64 as $b | $b;
+            {keys: (reduce mergek as $x ([]; . + $x)),
+            keys_base64: (reduce mergeb as $x ([]; . + $x))}
+        ' & ) 2>/dev/null
+
+        echo -n "${!jstr1}" > "$WORKDIR"/s1
+        echo -n "${!jstr2}" > "$WORKDIR"/s2
+
+        rm -f "$WORKDIR"/s1 "$WORKDIR"/s2
+    }
+
+    # validation function for splitShard
+    function validateSecrets {
+        local index
+        local text
+        local keys
+        local keys_base64
+        local root_token
+        local root_saved
+        local count
+        local saved
+        local shaA
+        local shaB
+
+        text=$( cat )
+        keys=$( echo "$text" | jq '.keys' )
+        keys_base64=$( echo "$text" | jq '.keys_base64' )
+        root_token=$( echo "$text" | jq -r '.root_token' )
+        if [ -z "$keys" -o "$keys" == "null" \
+                -o -z "$keys_base64" -o "$keys_base64" == "null" \
+                -o -z "$root_token" -o "$root_token" == "null" ]; then
+            log $ERROR "one or more missing keys"
+            return 1
+        fi
+
+        count=$( echo "$keys" | jq '. | length' )
+        if [ -z "$count" ] || [ "$count" -ne "$KEY_SECRET_SHARES" ]; then
+            log $ERROR "Incorrect array length for keys: " \
+                "$count instead of $KEY_SECRET_SHARES"
+            return 1
+        fi
+        count=$( echo "$keys_base64" | jq '. | length' )
+        if [ -z "$count" ] || [ "$count" -ne "$KEY_SECRET_SHARES" ]; then
+            log $ERROR "Incorrect array length for keys_base64: " \
+                "$count instead of $KEY_SECRET_SHARES"
+            return 1
+        fi
+
+        # pull secrets from k8s and merge into one json file.
+        for index in $( seq 0 $(( KEY_SECRET_SHARES - 1 )) ); do
+            keys="$(get_secret cluster-key-$index)"
+            if [ "$index" -eq 0 ]; then
+                saved="$keys"
+                continue
+            fi
+            saved=$( mergeKeyJson saved keys )
+        done
+
+        root_saved="$( get_secret cluster-key-root )"
+        saved=$( echo "$saved" | jq \
+            -c '{keys: .keys, keys_base64: .keys_base64, root_token: "'$root_saved'"}' )
+        shaA=$( echo "$text" | sha256sum )
+        shaB=$( echo "$saved" | sha256sum )
+        if [ "$shaA" != "$shaB" ]; then
+            log $ERROR "saved data differs from source data"
+            return 1
+        fi
+
+        log $INFO "Verified creation of secret"
+        return 0
+    }
+
     # Creates a list of all k8s vault pods and stores in text file.
     # Converts ips from X.X.X.X or a:b:c::d to X-X-X-X for use as pod
     # dns names
@@ -230,32 +325,60 @@ data:
 
     # Initializes the first vault pod, only needs to be performed once
     # after deploying the helm chart
-    # Stores the root token and master key shards in persistent storage
+    # Stores the root token and master key shards in k8s secrets
     function initVault {
         local keys
+        local index
+        local split_json
+        local secret_json
+        local key_error
 
         V0=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
         log $INFO "Initializing $V0"
+        secret_json="{\"secret_shares\": $KEY_SECRET_SHARES, \"secret_threshold\": 3}"
 
-        keys="$(
+        keys=$(
             curl -s \
             --cacert $CERT \
             --request POST \
-            --data  '{"secret_shares": 5, "secret_threshold": 3}' \
+            --data "$secret_json" \
             https://$V0.$DOMAIN:8200/v1/sys/init
-        )"
+        )
+        key_error=$(echo -n "$keys"| jq -r '.errors[]?')
+        if [ -n "$key_error" ]; then
+            log $ERROR "vault init request failed: $key_error"
+        fi
 
-        set_secret cluster-key-all /dev/stdin <<<"$keys"
+        for index in $(seq 0 $((KEY_SECRET_SHARES - 1 ))); do
+            split_json=$( echo -n "$keys" | splitShard "$index" )
+            set_secret "cluster-key-$index" /dev/stdin <<< "$split_json"
+        done
+
+        split_json=$( echo "$keys" | jq -r '.root_token' )
+        set_secret "cluster-key-root" /dev/stdin <<< "$split_json"
+
+        # validation if the split and store secrets is identical to the original pulled.
+        echo "$keys" | validateSecrets
     }
 
     # Uses the master key shards to unseal vault
     function unsealVault {
-        shards="$( get_secret cluster-key-all | jq -r .keys_base64[] )"
-        for shard in $shards; do
-            echo {\"key\": \"$shard\"} \
-            | curl -s --cacert $CERT --request POST -d @- \
-                https://$VAULT.$DOMAIN:8200/v1/sys/unseal > /dev/null
-            #Some sleep is required to allow Raft convergence
+        local index
+        local b64key
+        local key_pair
+        local key_response
+        local key_error
+        for index in $(seq 0 $((KEY_SECRET_SHARES - 1 ))); do
+            b64key=$( get_secret "cluster-key-$index" | jq -r '.keys_base64[]' )
+            key_pair="{\"key\": \"$b64key\"}"
+            key_response=$(curl -s --cacert $CERT --request POST -d "$key_pair" \
+                https://$VAULT.$DOMAIN:8200/v1/sys/unseal
+            )
+            key_error=$(echo -n "$key_response"| jq -r '.errors[]?')
+            if [ -n "$key_error" ]; then
+                log $ERROR "Vault unseal request failed: $key_error"
+            fi
+            # Some sleep is required to allow Raft convergence
             sleep "$UNSEAL_CONVERGE_TIME"
         done
     }
@@ -264,7 +387,7 @@ data:
     # joins other nodes to raft
     function joinRaft {
         CLUSTER_LEAD=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
-        ROOT_TOKEN=$( get_secret cluster-key-all | jq -r .root_token)
+        ROOT_TOKEN=$( get_secret cluster-key-root )
         local activeLink="https://sva-$VAULT_NAME-active.$SVCDOMAIN:8200"
         local dataJson="{\"leader_api_addr\": \"$activeLink\", \"leader_ca_cert\": \"$CA_ONELINE\"}"
         RAFT_STATUS=""
@@ -424,7 +547,7 @@ data:
         exit_on_trap 6
 
         log $DEBUG "Initializing the vault on vault-0 and" \
-            "storing keys in persistent storage"
+            "storing keys in k8s secrets"
         initVault
 
         #Some sleep required to allow convergence"
