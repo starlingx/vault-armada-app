@@ -71,10 +71,13 @@ data:
     LOG_OVERRIDE_FILE="$WORKDIR/log_level"
 
     # FUNCTIONS
-    function log {
-        # Log level in text
-        local logStr=""
-        case $1 in
+
+    # Convert log level to text for log message
+    function log_to_str {
+        local level="$1"
+        local logStr
+
+        case "$level" in
         $INFO)
             logStr="INFO"
             ;;
@@ -91,31 +94,46 @@ data:
             logStr="FATAL"
             ;;
         esac
+        echo "$logStr"
+    }
+
+    # Print the specified message to stdout if the call's specified
+    # level is at least the configured log level
+    function log {
+        local lvl="$1"
+        local logStr
+        local newLogLevel
 
         # check if log override file "Exists"
         if [ -f $LOG_OVERRIDE_FILE ]; then
-            local newLogLevel=$(cat $LOG_OVERRIDE_FILE)
+            newLogLevel=$(cat $LOG_OVERRIDE_FILE)
             # validation for newLogLevel
             if [[ "$newLogLevel" =~ ^[1-5]$ ]]; then
                 LOG_LEVEL=$newLogLevel
-                echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG Log level set to $logStr"
+                logStr="$( log_to_str "$LOG_LEVEL" )"
+                echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG" \
+                     "Log level set to $logStr"
             else
-                echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG"\
+                echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG" \
                      "Invalid log level read from $LOG_OVERRIDE_FILE."
             fi
             rm $LOG_OVERRIDE_FILE
         fi
 
-        # validate LOG_LEVEL. If it is not valid, then use DEFAULT_LOG_LEVEL instead.
+        # validate LOG_LEVEL. If it is not valid, then use
+        # DEFAULT_LOG_LEVEL instead.
         if [[ ! "$LOG_LEVEL" =~ ^[1-5]$ ]]; then
             echo "$(date +%Y-%m-%dT%H-%M-%S) DEBUG" \
-                 "Invalid log level detected, will be set to $DEFAULT_LOG_LEVEL"
+                 "Invalid log level detected, will be set to" \
+                 "$( log_to_str "$DEFAULT_LOG_LEVEL" )"
             LOG_LEVEL=$DEFAULT_LOG_LEVEL
         fi
 
-        # check if the log level for this call is equal to or higher than the set log level
-        if [ $1 -ge $LOG_LEVEL ]; then
+        # check if the log level for this call is equal to or higher
+        # than the set log level
+        if [ "$lvl" -ge "$LOG_LEVEL" ]; then
             # print log
+            logStr="$( log_to_str "$lvl" )"
             echo "$(date +%Y-%m-%dT%H-%M-%S) $logStr ${@:2}"
         fi
     }
