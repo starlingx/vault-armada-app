@@ -22,9 +22,9 @@ class K8SAppVaultAppMixin(object):
 # - Ceph Storage
 # - vault app
 class K8sAppVaultControllerTestCase(K8SAppVaultAppMixin,
-                                      dbbase.BaseIPv6Mixin,
-                                      dbbase.BaseCephStorageBackendMixin,
-                                      dbbase.ControllerHostTestCase):
+                                    dbbase.BaseIPv6Mixin,
+                                    dbbase.BaseCephStorageBackendMixin,
+                                    dbbase.ControllerHostTestCase):
     pass
 
 
@@ -34,6 +34,6 @@ class K8sAppVaultControllerTestCase(K8SAppVaultAppMixin,
 # - Ceph Storage
 # - vault app
 class K8SAppVaultAIOTestCase(K8SAppVaultAppMixin,
-                               dbbase.BaseCephStorageBackendMixin,
-                               dbbase.AIOSimplexHostTestCase):
+                             dbbase.BaseCephStorageBackendMixin,
+                             dbbase.AIOSimplexHostTestCase):
     pass

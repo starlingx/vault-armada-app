@@ -4,9 +4,12 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
+"""Constants values for vault helm"""
+
 # Helm: Supported charts:
 # These values match the names in the chart package's Chart.yaml
 HELM_APP_VAULT = 'vault'
+HELM_RELEASE_VAULT = 'sva-vault'
 HELM_CHART_VAULT = 'vault'
 HELM_CHART_NS_VAULT = 'vault'
 HELM_VAULT_SERVER_POD = 'server'

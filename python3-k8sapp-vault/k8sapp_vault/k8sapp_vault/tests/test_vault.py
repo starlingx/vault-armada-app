@@ -14,7 +14,7 @@ from sysinv.tests.helm import base
 
 
 class VaultTestCase(test_plugins.K8SAppVaultAppMixin,
-                          base.HelmTestCaseMixin):
+                    base.HelmTestCaseMixin):
 
     def setUp(self):
         super(VaultTestCase, self).setUp()
@@ -23,7 +23,7 @@ class VaultTestCase(test_plugins.K8SAppVaultAppMixin,
 
 
 class VaultIPv4ControllerHostTestCase(VaultTestCase,
-                                            dbbase.ProvisionedControllerHostTestCase):
+                                      dbbase.ProvisionedControllerHostTestCase):
 
     def test_replicas(self):
         overrides = self.operator.get_helm_chart_overrides(
@@ -36,8 +36,8 @@ class VaultIPv4ControllerHostTestCase(VaultTestCase,
 
 
 class VaultIPv6AIODuplexSystemTestCase(VaultTestCase,
-                                             dbbase.BaseIPv6Mixin,
-                                             dbbase.ProvisionedAIODuplexSystemTestCase):
+                                       dbbase.BaseIPv6Mixin,
+                                       dbbase.ProvisionedAIODuplexSystemTestCase):
 
     def test_replicas(self):
         overrides = self.operator.get_helm_chart_overrides(
