@@ -18,6 +18,11 @@ data:
     DOMAIN="${VAULT_NS}.pod.cluster.local"
     SVCDOMAIN="${VAULT_NS}.svc.cluster.local"
 
+    # define host targets and port
+    POD_TARGET_BASE="$DOMAIN"  # requires 'DNS NAME' of pod
+    ACTIVE_TARGET="${VAULT_FN}-active.${SVCDOMAIN}"  # only the active
+    TARGET_PORT=8200
+
     # impermanent location to store files while running
     WORKDIR=/workdir
     mkdir $WORKDIR
@@ -53,6 +58,11 @@ data:
 
     # Vault server health query timeout during HA recovery scenario
     QUERY_TMOUT={{ .Values.manager.healthQueryTimeout }}
+
+    # Default curl timout for REST API commands to vault server.
+    # This value is what testing shows is the default timeout.
+    # Specifying it explicitly for clarity.
+    API_TMOUT=120
 
     STATEFULSET_RATE=5
     INIT_CONVERGE_TIME=10
@@ -371,11 +381,106 @@ data:
         set_secret "cluster-key-root" /dev/stdin <<< "$split_json"
     }
 
+    # Address a vault server with REST API request. Capture stderr,
+    # stdout and result of curl commands.  Print error and debug logs
+    #
+    # Required positional parameters, in order:
+    #     Response variable    : variable in which to store the response
+    #                            from vault
+    #     http request type    : GET, POST, DELETE
+    #     vault server         : FQDN
+    #     vault REST API path  : e.g., /sys/health
+    #
+    # Optional final parameter : a quoted string of data
+    #
+    # Examples:
+    #    # get health status query for the active vault status
+    #    vaultAPI myvar GET $ACTIVE_TARGET /sys/health
+    #
+    #    # post rekey initialization with shares 5 and threshold 3
+    #    data='{"secret_shares": 5,"secret_threshold": 3}'
+    #    vaultAPI myvar POST $ACTIVE_TARGET /sys/rekey/init "$data"
+    #
+    # Overridable ENV variables:
+    #     API_TMOUT: the curl timeout
+    #     NO_HEADER: omit header (the root token) if not empty
+    #
+    # Output:
+    # Return the stdout and command result code
+    #
+    # Print log messages for errors.  The responses from vault are
+    # restricted to DEBUG lovel log in case there's secret information
+    # in them. But a non-specific ERROR message is printed in all
+    # cases of errors.
+    function vaultAPI {
+        local answer="$1"
+        local reqarg="$2"
+        local server="$3"
+        local apipath="$4"
+        local data="$5"
+        local cmderr=""
+        local cmdout=""
+        local cmdres=1
+        local header=""
+        local errors=""
+
+        if [ -z "$NO_HEADER" ]; then
+            header="X-Vault-Token:$( get_secret cluster-key-root )"
+        fi
+
+        log $DEBUG "Executing: [curl -s -S --cacert \""$CERT"\"" \
+            ${API_TMOUT:+"--connect-timeout" "$API_TMOUT"} \
+            ${header:+"--header" "$header"} \
+            "--request \"$reqarg\"" \
+            ${data:+"--data" "$data"} \
+            "\"https://${server}:${TARGET_PORT}/v1${apipath}\"]"
+
+        # Capture stderr and stdout copied from google search example
+        # on stack overflow.  Add capture of the command result code
+        {
+            IFS=$'\n' read -r -d '' cmderr;
+            IFS=$'\n' read -r -d '' cmdout;
+            cmdres="$( echo "$cmdout" | tail -n1 )"
+            cmdout="$( echo "$cmdout" | head -n-1 )"
+        } < <((printf '\0%s\0' "$(
+            curl -s -S --cacert "$CERT" \
+                ${API_TMOUT:+"--connect-timeout" "$API_TMOUT"} \
+                ${header:+"--header" "$header"} \
+                --request "$reqarg" \
+                ${data:+"--data" "$data"} \
+                "https://${server}:${TARGET_PORT}/v1${apipath}"
+            echo "$?"
+        )" 1>&2) 2>&1)
+
+        if [ "$cmdres" -ne 0 ]; then
+            log $ERROR "curl returns non-zero result: $cmdres"
+        fi
+        if [ -n "$cmderr" ]; then
+            log $ERROR "curl returns stderr"
+            log $DEBUG "curl returns stderr: [$cmderr]"
+        fi
+
+        if [ -n "$cmdout" ]; then
+            # errors from the REST API
+            errors=$( echo "$cmdout" | jq -cr '.errors' )
+            if [[ "$errors" != 'null' ]] && [ -n "$errors" ]; then
+                log $ERROR "vault REST API error"
+                log $DEBUG "vault REST API error: $errors"
+                if [ "$cmdres" -eq 0 ]; then
+                    # this code wants to know if there was an error
+                    cmdres=1
+                fi
+            fi
+        fi
+        eval "$answer"='$cmdout'
+        return $cmdres
+    }
+
     # Initializes the first vault pod, only needs to be performed once
     # after deploying the helm chart
     # Stores the root token and master key shards in k8s secrets
     function initVault {
-        local V0
+        local V0  # the zeroeth vault pod
         local keys
         local key_error
         local shares
@@ -385,13 +490,11 @@ data:
         log $INFO "Initializing $V0"
         shares='"secret_shares": '$KEY_SECRET_SHARES
         threshold='"secret_threshold": '$KEY_REQUIRED_THRESHOLD
-        keys=$(
-            curl -s \
-            --cacert $CERT \
-            --request POST \
-            --data "{$shares, $threshold}" \
-            https://$V0.$DOMAIN:8200/v1/sys/init
-        )
+
+        NO_HEADER=true \
+        vaultAPI keys POST $V0.$POD_TARGET_BASE \
+            /sys/init "{$shares, $threshold}"
+
         key_error=$(echo -n "$keys"| jq -r '.errors[]?')
         if [ -n "$key_error" ]; then
             log $ERROR "vault init request failed: $key_error"
@@ -405,6 +508,7 @@ data:
 
     # Uses the master key shards to unseal vault
     function unsealVault {
+        local server="$1"
         local index
         local b64key
         local key_pair
@@ -413,9 +517,11 @@ data:
         for index in $(seq 0 $((KEY_SECRET_SHARES - 1 ))); do
             b64key=$( get_secret "cluster-key-$index" | jq -r '.keys_base64[]' )
             key_pair="{\"key\": \"$b64key\"}"
-            key_response=$(curl -s --cacert $CERT --request POST -d "$key_pair" \
-                https://$VAULT.$DOMAIN:8200/v1/sys/unseal
-            )
+
+            NO_HEADER=true \
+            vaultAPI key_response POST $server.$POD_TARGET_BASE \
+                /sys/unseal "$key_pair"
+
             key_error=$(echo -n "$key_response"| jq -r '.errors[]?')
             if [ -n "$key_error" ]; then
                 log $ERROR "Vault unseal request failed: $key_error"
@@ -428,42 +534,25 @@ data:
     # Takes the address of vault-0 as the cluster leader and
     # joins other nodes to raft
     function joinRaft {
-        CLUSTER_LEAD=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
-        ROOT_TOKEN=$( get_secret cluster-key-root )
-        local activeLink="https://sva-$VAULT_NAME-active.$SVCDOMAIN:8200"
+        local dnsname="$1"
+        local activeLink="https://${ACTIVE_TARGET}:${TARGET_PORT}"
         local dataJson="{\"leader_api_addr\": \"$activeLink\", \"leader_ca_cert\": \"$CA_ONELINE\"}"
         RAFT_STATUS=""
         while [ "$RAFT_STATUS" != "true" ]; do
-            RAFT_STATUS=$(curl -s \
-                --cacert $CERT \
-                -H "X-Vault-Token: $ROOT_TOKEN" \
-                --request POST \
-                --data "$dataJson" \
-                https://$row.$DOMAIN:8200/v1/sys/storage/raft/join)
 
-            log $INFO "$row $RAFT_STATUS"
+            vaultAPI RAFT_STATUS POST $dnsname.$POD_TARGET_BASE \
+                /sys/storage/raft/join "$dataJson"
+
+            log $INFO "$dnsname $RAFT_STATUS"
             RAFT_STATUS=$(echo $RAFT_STATUS | jq -r .joined)
             sleep "$JOIN_CONVERGE_TIME"
         done
-    }
-
-    # Simply calls the status check of a vault, used to check if it is
-    # initialized, unsealed, or part of raft cluster
-    function vaultServerStatus {
-        local tmout=""
-
-        if [ -n "$1" ]; then
-            tmout="--connect-timeout $1"
-        fi
-        curl $tmout --cacert $CERT -s \
-            https://$row.$DOMAIN:8200/v1/sys/health
     }
 
     function runStateMachine {
         local host="$1"
         local dns_name="$2"
         local sealed="$3"
-        local VAULT="$dns_name"
         local status_rec
         local old_rec
         local counter
@@ -516,7 +605,7 @@ data:
             # We've waited (STATUS_RATE * STATEMACH_START) seconds
             # Or, STATEMACH_START == 0 means do not delay
             log $INFO "Unsealing $dns_name"
-            unsealVault
+            unsealVault "$dns_name"
             echo "$status_rec" >> "$PODREC_TMP_F"
             return
         fi
@@ -527,18 +616,28 @@ data:
     }
 
     function vaultInitialized {
-        row=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
-        vaultServerStatus > $WORKDIR/healthcheck.txt
-        IS_VAULT_INITIALIZED=$(cat $WORKDIR/healthcheck.txt | jq -r .initialized)
-        text="$( grep $row $WORKDIR/pods.txt )"
+        local response
+        local dnsname
+        local initialized
+        local text
+
+        dnsname=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
+        NO_HEADER=true \
+        vaultAPI response GET $dnsname.$POD_TARGET_BASE /sys/health
+
+        echo -n "$response" > $WORKDIR/healthcheck.txt
+        initialized=$( echo "$response" | jq -r .initialized )
+
+        text="$( grep $dnsname $WORKDIR/pods.txt )"
         if [ $? -eq 0 ]; then
             log $DEBUG "$text"
-            log $DEBUG "Initialized status is $IS_VAULT_INITIALIZED"
+            log $DEBUG "Initialized status is $initialized"
         fi
 
-        # The empty check is here as a extra safety net, but an investigation into
-        # in which exact conditions would IS_VAULT_INITIALIZED be empty would be helpful.
-        if [ ! -z $IS_VAULT_INITIALIZED ] && [ $IS_VAULT_INITIALIZED = false ]; then
+        # The empty check is here as a extra safety net, but an
+        # investigation into in which exact conditions the result would
+        # be empty would be helpful.
+        if [ ! -z $initialized ] && [ $initialized = false ]; then
             return 1
         else
             return 0
@@ -1004,14 +1103,13 @@ data:
 
         log $DEBUG "Unsealing vault-0 using the init shards"
         for row in $(awk 'NR==1{print $2}' $WORKDIR/pods.txt); do
-            VAULT=$row
-            unsealVault
+            unsealVault "$row"
         done
 
         log $DEBUG "Joining other vault servers to the HA Raft cluster"
         for row in $(awk 'NR>1{print $2}' $WORKDIR/pods.txt); do
             log $DEBUG "$( grep $row $WORKDIR/pods.txt )"
-            joinRaft
+            joinRaft "$row"
             sleep "$JOIN_RATE"
         done
 
@@ -1019,8 +1117,7 @@ data:
         log $INFO "Unsealing the remaining vaults"
         for row in $(awk 'NR>1{print $2}' $WORKDIR/pods.txt); do
             log $DEBUG "$( grep $row $WORKDIR/pods.txt )"
-            VAULT=$row
-            unsealVault
+            unsealVault "$row"
             sleep "$UNSEAL_RATE"
             exit_on_trap 8
         done
@@ -1050,19 +1147,24 @@ data:
         exit_on_trap 11
         getVaultPods
         exit_on_trap 12
-        while read host row; do
-            if [ -z "$row" ]; then
+        while read host dnsname; do
+            if [ -z "$dnsname" ]; then
                 # probably a recovering pod waiting for an IP address
-                log $DEBUG "pod list has empty data: [$host] [$row]"
+                log $DEBUG "pod list has empty data: [$host] [$dnsname]"
                 continue
             fi
-            vaultServerStatus $QUERY_TMOUT > $WORKDIR/healthcheck.txt
-            TEMP=$(cat $WORKDIR/healthcheck.txt | jq -r .sealed)
+
+            NO_HEADER=true API_TMOUT=$QUERY_TMOUT \
+            vaultAPI server_status GET $dnsname.$POD_TARGET_BASE \
+                /sys/health
+            echo -n "$server_status" > $WORKDIR/healthcheck.txt
+
+            TEMP=$( echo "$server_status" | jq -r .sealed )
 
             exit_on_trap 13
             # Decide when to unseal the vault server; includes
             # Adding records to new_pods_status.txt
-            runStateMachine "$host" "$row" "$TEMP"
+            runStateMachine "$host" "$dnsname" "$TEMP"
             exit_on_trap 14
         done <$WORKDIR/pods.txt
         mv "$PODREC_TMP_F" "$PODREC_F"
