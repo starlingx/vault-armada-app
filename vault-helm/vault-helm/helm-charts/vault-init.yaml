@@ -25,7 +25,7 @@ data:
 
     # impermanent location to store files while running
     WORKDIR=/workdir
-    mkdir $WORKDIR
+    mkdir -p $WORKDIR
 
     # Trap and trap notification file. When SIGTERM is sent to this pod
     # we want to exit promptly and gracefully.
@@ -71,17 +71,44 @@ data:
     KEY_SECRET_SHARES=5
     KEY_REQUIRED_THRESHOLD=3
 
+    # Enable vault rekey upon conversion of storage from PVC to k8s
+    # secrets
+    AUTO_REKEY_CONVERT={{ .Values.manager.rekey.enableOnPVCConversion }}
+
+    # Keep track of vault-manager restarting the rekey procedure; if
+    # this variable is not true (0) and a rekey procedure is in
+    # progress, then vault-manager was restarted
+    REKEY_STARTED=1
+
+    # Vault manager will rekey the vault at a time when the vault
+    # servers are stable for a period of time specified by
+    # REKEY_STABLE_TIME seconds
+    REKEY_STABLE_TIME=300
+
+    # Global variable to share rekey status
+    REKEY_STATUS_JSON=''
+
+    # Keep track of shards that were last successful
+    SHARDS_LAST_SUCCESSFUL="cluster-key"
+
     # Records for seal status state machine:
     PODREC_F="$WORKDIR/previous_pods_status.txt"
     PODREC_TMP_F="$WORKDIR/new_pods_status.txt"
 
     # Vault server health query timeout during HA recovery scenario
-    QUERY_TMOUT={{ .Values.manager.healthQueryTimeout }}
+    QUERY_TMOUT={{ .Values.manager.api.healthQueryTimeout }}
 
     # Default curl timout for REST API commands to vault server.
     # This value is what testing shows is the default timeout.
     # Specifying it explicitly for clarity.
     API_TMOUT=120
+
+    # API timeout for unseal operations
+    API_UNSEAL_OP_TMOUT={{ .Values.manager.api.unsealOpTimeout }}
+
+    # API timeout values for rekey operations
+    API_REKEY_QUERY_TMOUT={{ .Values.manager.api.rekeyStatusTimeout }}
+    API_REKEY_OP_TMOUT={{ .Values.manager.api.rekeyOpTimeout }}
 
     STATEFULSET_RATE=5
     INIT_CONVERGE_TIME=10
@@ -303,17 +330,51 @@ data:
         rm -f "$WORKDIR"/s1 "$WORKDIR"/s2
     }
 
+    # Prepare a json document from the k8s secrets prefixed with
+    # prefix, and the root token
+    #
+    # Required parameter: The prefix of the k8s secrets containing
+    #                     the shards
+    #
+    # Outputs the json document which is comparable to the original
+    # response for vault initialization.  The calling function is
+    # responsible for validating the document content.
+    #
+    function reconstructInitResponse {
+        local prefix="$1"
+        local index
+        local keys
+        local mkeys
+
+        # pull secrets from k8s and merge into one json file.
+        for index in $( seq 0 $(( KEY_SECRET_SHARES - 1 )) ); do
+            keys="$( get_secret "${prefix}-$index" )"
+            if [ "$index" -eq 0 ]; then
+                mkeys="$keys"
+                continue
+            fi
+            mkeys=$( mergeKeyJson mkeys keys )
+        done
+
+        # append the root secret and echo the document
+        echo "$mkeys" | jq -c '{keys: .keys,
+            keys_base64: .keys_base64,
+            root_token: "'$( get_secret "cluster-key-root" )'"}'
+    }
+
     # Check the structure of json data and confirm equivalence of
     # the stdin with stored secrets
     #
+    # Required parameter: The prefix of the k8s secrets containing
+    #                     the shards in stored secrets
+    #
     # Returns the normal linux success=0, failure!=0
     function validateSecrets {
-        local index
+        local keyprefix="$1"
         local text
         local keys
         local keys_base64
         local root_token
-        local root_saved
         local count
         local saved
         local shaA
@@ -353,19 +414,7 @@ data:
             return 1
         fi
 
-        # pull secrets from k8s and merge into one json file.
-        for index in $( seq 0 $(( KEY_SECRET_SHARES - 1 )) ); do
-            keys="$(get_secret cluster-key-$index)"
-            if [ "$index" -eq 0 ]; then
-                saved="$keys"
-                continue
-            fi
-            saved=$( mergeKeyJson saved keys )
-        done
-
-        root_saved="$( get_secret cluster-key-root )"
-        saved=$( echo "$saved" | jq \
-            -c '{keys: .keys, keys_base64: .keys_base64, root_token: "'$root_saved'"}' )
+        saved="$( reconstructInitResponse "${keyprefix}" )"
 
         # finally ensure that the saved secrets are the same as the
         # supplied text
@@ -383,14 +432,30 @@ data:
     # Creates a list of all k8s vault pods and stores in text file.
     # Converts ips from X.X.X.X or a:b:c::d to X-X-X-X for use as pod
     # dns names
+    #
+    # Optional parameter:
+    #   --ha : append vault server active/standby status (boolean)
+    #
+    # Example output with --ha
+    #    sva-vault-0  172-16-226-97  true
     function getVaultPods {
+        local ha="$1"
+        local jpath
+        local meta='{.metadata.name}'
+        local ip='{.status.podIPs[].ip}'
+        local active='{.metadata.labels.vault-active}'
+        local jfields=${meta}'{"\t"}'${ip}
+
+        if [ "$ha" == "--ha" ]; then
+            jfields=${jfields}'{"\t"}'${active}
+        fi
+        jpath='{range .items[*]}'"$jfields"'{"\n"}{end}'
+
         kubectl get pods \
         -n "$VAULT_NS" \
         -l component=server,app.kubernetes.io/name=vault \
-        -o=jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIPs[].ip}{"\n"}{end}' \
-        > $WORKDIR/pods.txt
-
-        sed -i 's/\.\|:/-/g' $WORKDIR/pods.txt
+        -o=jsonpath="$jpath" \
+        | sed 's/\.\|:/-/g'
     }
 
     # Wait for the vault servers in the stateful set to be
@@ -428,20 +493,29 @@ data:
     # Takes the json document output from vault initialization
     # and stores it into secrets for key shards and the root token
     #
+    # Required parameter: The prefix of the k8s secrets into which to
+    #                     store the shards
+    #
     # This only works if the secrets are not pre-existing.  An error
     # is printed by set_secrets.
     function storeVaultInitSecrets {
-        local secrets="$1"
+        local keyprefix="$1"
+        local secrets
         local index
         local split_json
 
+        secrets=$( cat )
+
         for index in $(seq 0 $((KEY_SECRET_SHARES - 1 ))); do
             split_json=$( echo -n "$secrets" | splitShard "$index" )
-            set_secret "cluster-key-$index" /dev/stdin <<< "$split_json"
+            set_secret "${keyprefix}-$index" /dev/stdin <<< "$split_json"
         done
 
+        # if the data contains root_token, save it as well
         split_json=$( echo "$secrets" | jq -r '.root_token' )
-        set_secret "cluster-key-root" /dev/stdin <<< "$split_json"
+        if [ -n "$split_json" -a "$split_json" != 'null' ]; then
+            set_secret "${keyprefix}-root" /dev/stdin <<< "$split_json"
+        fi
     }
 
     # Address a vault server with REST API request. Capture stderr,
@@ -493,9 +567,9 @@ data:
 
         log $DEBUG "Executing: [curl -s -S --cacert \""$CERT"\"" \
             ${API_TMOUT:+"--connect-timeout" "$API_TMOUT"} \
-            ${header:+"--header" "$header"} \
+            ${header:+"--header" "xxxx"} \
             "--request \"$reqarg\"" \
-            ${data:+"--data" "$data"} \
+            ${data:+"--data" "xxxx"} \
             "\"https://${server}:${TARGET_PORT}/v1${apipath}\"]"
 
         # Capture stderr and stdout copied from google search example
@@ -563,15 +637,16 @@ data:
             log $ERROR "vault init request failed: $key_error"
         fi
 
-        storeVaultInitSecrets "$keys"
+        echo "$keys" | storeVaultInitSecrets cluster-key
 
         # check if the secrets match vault's REST API response
-        echo "$keys" | validateSecrets
+        echo "$keys" | validateSecrets cluster-key
     }
 
     # Uses the master key shards to unseal vault
     function unsealVault {
         local server="$1"
+        local prefix="$2"
         local index
         local b64key
         local data
@@ -579,9 +654,14 @@ data:
         local value
         local autherror
 
+        if [ -z "$prefix" ]; then
+            prefix='cluster-key'
+        fi
+
         # always abort an unseal in progress
         data='{"reset": true}'
         NO_HEADER=true \
+        API_TMOUT=$API_UNSEAL_OP_TMOUT \
         vaultAPI response POST $server.$POD_TARGET_BASE \
             /sys/unseal "$data"
         if [ $? -ne 0 ]; then
@@ -595,11 +675,12 @@ data:
         fi
 
         for index in $(seq 0 $((KEY_SECRET_SHARES - 1 ))); do
-            b64key=$( get_secret "cluster-key-$index" \
+            b64key=$( get_secret "${prefix}-$index" \
                 | jq -r '.keys_base64[]' )
             data="{\"key\": \"$b64key\"}"
 
             NO_HEADER=true \
+            API_TMOUT=$API_UNSEAL_OP_TMOUT \
             vaultAPI response POST $server.$POD_TARGET_BASE \
                 /sys/unseal "$data"
             if [ $? -ne 0 ]; then
@@ -609,10 +690,12 @@ data:
                 autherror="cipher: message authentication failed"
                 if [[ "$response" == *"$autherror"* ]]; then
                     log $ERROR "Failed to authenticate /sys/unseal" \
-                        "with cluster-key"
+                        "with $prefix"
                     # perhaps use this info in the future
                     return 2
                 fi
+                log $DEBUG "Unknown failure authenticating unseal" \
+                    "$response"
                 return 1
             fi
 
@@ -620,14 +703,65 @@ data:
             # the response will indicate sealed=false
             value="$( echo "$response" | jq -r ".sealed" )"
             if [ "$value" == "false" ]; then
+                log $DEBUG "Success authenticating unseal"
                 return 0
             fi
 
+            value="$( echo "$response" | jq -r ".progress" )"
+            log $DEBUG "Success authenticating unseal" \
+                "(${value}/${KEY_REQUIRED_THRESHOLD})"
             # Some sleep is required to allow Raft convergence
             sleep "$UNSEAL_CONVERGE_TIME"
         done
 
         log $ERROR "unsealVault completes without unseal or error"
+        return 1
+    }
+
+    # Unseal a vault server under conditions of recovery,
+    # including selecting and remembering alternate shard
+    # secrets.
+    #
+    # This algorithm remembers the last shards used to unseal the vault,
+    # to prioritize using those again the next time.
+    function unsealVaultRecover {
+        local server="$1"
+        local attempted
+        local use_secrets=""
+
+        if [ -n "$SHARDS_LAST_SUCCESSFUL" ]; then
+            # double check the keys we were using are not deleted
+            if assertShardSecrets "$SHARDS_LAST_SUCCESSFUL"; then
+                use_secrets="$SHARDS_LAST_SUCCESSFUL"
+            fi
+        fi
+
+        use_secrets="$use_secrets $( \
+            getOtherShardSecrets "$SHARDS_LAST_SUCCESSFUL" )"
+        for attempted in $use_secrets; do
+            log $INFO "Attempt unseal with $attempted"
+            unsealVault "$server" "$attempted"
+            case $? in
+                0)
+                    SHARDS_LAST_SUCCESSFUL="$attempted"
+                    return 0
+                    ;;
+                2)
+                    # an error is already printed
+                    # try a different set of shards
+                    continue
+                    ;;
+                *)
+                    # failure is not clear, try again later
+                    log $ERROR "Fail to unseal $server with" \
+                        "$attempted; try later"
+                    return 1
+                    ;;
+            esac
+        done
+
+        log $ERROR "No set of shards unseal the server $server:" \
+            "attempted: $use_secrets"
         return 1
     }
 
@@ -705,7 +839,7 @@ data:
             # We've waited (STATUS_RATE * STATEMACH_START) seconds
             # Or, STATEMACH_START == 0 means do not delay
             log $INFO "Unsealing $dns_name"
-            unsealVault "$dns_name"
+            unsealVaultRecover "$dns_name"
             echo "$status_rec" >> "$PODREC_TMP_F"
             return
         fi
@@ -734,7 +868,7 @@ data:
 
             log $INFO "Query server $dnsname for initialization status"
             NO_HEADER=true \
-            API_TMOUT=2 \
+            API_TMOUT=$QUERY_TMOUT \
             vaultAPI response GET $dnsname.$POD_TARGET_BASE /sys/health
             if [ $? -ne 0 ]; then
                 log $INFO "waiting..."
@@ -842,6 +976,102 @@ data:
         kubectl get secrets -n vault "$name" \
             -o jsonpath='{.metadata.name}' 2>/dev/null \
         | grep "$name"
+    }
+
+    # Return linux success=0 if any of the secrets exist
+    function secretsExistAny {
+        local list="$@"
+        local name
+
+        for name in $list; do
+            secretExists $name >/dev/null
+            if [ $? -eq 0 ]; then
+                return 0
+            fi
+        done
+
+        return 1
+    }
+
+    # Assert that the shard secrets starting with prefix exist
+    #
+    # Parameter: prefix for k8s secrets, such as 'cluster-key'
+    #
+    # Optional second parameter:
+    #    --nokeys : failed if at least one exists
+    #
+    # Returns the normal linux success=0, failure!=0
+    #
+    # When --nokeys is selected, the failure return code is the number
+    # of secrets found.  Zero secrets were expected.
+    #
+    # When --nokeys is omitted, the failure return code is either the
+    # number of secrets found or if the number of secrets found was
+    # zero, KEY_SECRET_SHARES is returned as error code
+    function assertShardSecrets {
+        local prefix="$1"
+        local nokey="$2"
+        local i
+        local count=0
+
+        for i in $( seq 0 $((KEY_SECRET_SHARES-1)) ); do
+            secretExists "${prefix}-$i" >/dev/null
+            if [ $? -eq 0 ]; then
+                count=$((count+1))
+            fi
+        done
+        if [ "$nokey" == "--nokeys" ]; then
+            # 0 secrets == true (0)
+            # Else return the number of secrets
+            return $count
+        fi
+        if [ "$count" -eq "$KEY_SECRET_SHARES" ]; then
+            return 0
+        elif [ "$count" -eq 0 ]; then
+            return "$KEY_SECRET_SHARES" # an error result
+        fi
+        return "$count"
+    }
+
+    # Return a list of other existing Shard secrets other than the set
+    # specified
+    #
+    # Sort by priority order:
+    #    cluster-key
+    #    cluster-rekey
+    #    cluster-key-bk
+    #
+    function getOtherShardSecrets {
+        local omit="$1"
+        local secrets="cluster-key cluster-rekey cluster-key-bk"
+        local secret
+        local others=""
+
+        for secret in $secrets; do
+            if [ "$secret" == "$omit" ]; then
+                continue
+            fi
+            if assertShardSecrets $secret; then
+                others="$others $secret"
+            fi
+        done
+        echo $others
+    }
+
+    # Delete the specified list of secrets
+    #
+    # Uses a single kubectl command
+    function deleteSecrets {
+        local secrets="$@"
+        local text
+        text="$( kubectl delete secrets -n vault \
+            $secrets 2>&1 )"
+        if [ $? -ne 0 ]; then
+            log $ERROR "Error deleting secrets: ["$text"]"
+            return 1
+        fi
+        log $INFO $text
+        return 0
     }
 
     # Check if the PVC resource exists
@@ -1015,18 +1245,6 @@ data:
         fi
     }
 
-    # Delete the bootstrap secret
-    function deleteBootstrap {
-        local text
-        text="$( kubectl delete secrets -n vault \
-            cluster-key-bootstrap 2>&1 )"
-        if [ $? -ne 0 ]; then
-            log $ERROR "Error deleting bootstrap secret: [$text]"
-        else
-            log $INFO "$text"
-        fi
-    }
-
     # Run a job/pod, to mount the PVC resource, and retrieve the secrets
     # from PVC.
     #
@@ -1096,11 +1314,11 @@ data:
                 "validating"
         else
             # create a secret from the data
-            storeVaultInitSecrets "$PVCtext"
+            echo "$PVCtext" | storeVaultInitSecrets cluster-key
         fi
 
         # verify the data stored versus text from PVC
-        echo "$PVCtext" | validateSecrets
+        echo "$PVCtext" | validateSecrets cluster-key
         result=$?
         if [ "$result" -eq 0 ]; then
             securelyWipePVC "$pod"
@@ -1122,16 +1340,16 @@ data:
         local count
 
         text="$( get_secret cluster-key-bootstrap )"
-        storeVaultInitSecrets "$text"
+        echo "$text" | storeVaultInitSecrets cluster-key
 
         # verify the split secrets versus the bootstrap text
-        echo "$text" | validateSecrets
+        echo "$text" | validateSecrets cluster-key
         if [ $? -ne 0 ]; then
             # an error is already printed
             return 1
         fi
 
-        deleteBootstrap
+        deleteSecrets cluster-key-bootstrap
 
         # Also validate and delete the PVC resource
         # This procedure depends on waiting for the old version
@@ -1146,6 +1364,45 @@ data:
         convertPVC
     }
 
+    if ! which uuidgen; then
+        # delete me when uuidgen is added to vault-manager docker image
+        function uuidgen {
+            # not a uuid generator, but close enough for test/debug
+            echo "05f72ea1-36f3-4bff-bb1e-$(
+                for i in 1 2 3; do
+                    printf "%04d" $( expr $RANDOM % 9999 );
+                done )"
+        }
+    fi
+
+    # When enabled, after conversion of storage from PVC to k8s secrets,
+    # Vault-manager will prompt itself to rekey the vault server
+    # storage.
+    function requestRekey {
+        local value
+
+        if [ "$AUTO_REKEY_CONVERT" != "true" ]; then
+            return
+        fi
+        log $INFO "Auto rekey enabled: [$AUTO_REKEY_CONVERT]"
+
+        secretExists cluster-rekey-request >/dev/null
+        if [ $? -eq 0 ]; then
+            value="$( get_secret cluster-rekey-request )"
+            log $WARNING "Auto rekey: rekey request exists: $value"
+            return
+        fi
+
+        value=$( uuidgen )
+        set_secret cluster-rekey-request /dev/stdin <<<"$value"
+        if [ $? -eq 0 ]; then
+            log $INFO "Rekey requested: $value"
+        else
+            log $ERROR "Failed to request rekey: $value"
+        fi
+        return
+    }
+
     function runConversion {
         if [ -n "$K8S_SECRETS_PREEXIST" ]; then
             log $INFO "Cluster secrets exist"
@@ -1156,6 +1413,7 @@ data:
             # of the application.
             log $INFO "Using secrets provided in $BOOTSTRAP_PREEXISTS"
             convertBootstrapSecrets
+            requestRekey
             return
         elif [ -z "$PVC_PREEXISTS" ]; then
             log $INFO "No pre-existing secrets exist"
@@ -1167,6 +1425,1572 @@ data:
         # example if the old application is removed and deleted, and the
         # new application is uploaded and applied.
         convertPVC
+        requestRekey
+    }
+
+    # Test whether the specified vault server(s) agree with the
+    # specified status of the specified endpoint
+    #
+    # Print DEBUG logs when status is non-conforming (the function will
+    # be used to wait for conformance).
+    #
+    # The first parameter is the vault API endpoint to check status
+    # of, either /sys/rekey/init or /sys/rekey/verify
+    # The second parameter is the quoted string of json data returned
+    # from vault REST API call.  The data should include these fields,
+    # which are tested for conformance:
+    #     {"nonce": "S", "started": B, "progress": N,
+    #      "verification_required": B}
+    #
+    # The other parameters are the servers to test, specified as
+    # dash-separated IP address output of getVaultPods (XX-XX-XX-XX)
+    #
+    # Returns the normal linux success=0, failure!=0
+    function assertRekeyStatus {
+        local endpoint="$1"
+        local data="$2"
+        shift 2
+        local -a servers=($@)
+        local -a key_arr
+        local required
+        local jscript
+        local key
+        local index
+        local error
+        local server
+        local response
+        local record
+
+        required="nonce progress started verification_required"
+        jscript=".nonce, .progress, .started, .verification_required"
+        if [ "$endpoint" == "/sys/rekey/verify" ]; then
+            required="nonce progress started"
+            jscript=".nonce, .progress, .started"
+        fi
+
+        # quick check to assure the data parameter is sane
+        key_arr=($(echo "$data" | jq -r 'keys[]' | sort))
+        for key in $required; do
+            if [[ " ${key_arr[*]} " != *" $key "* ]]; then
+                log $ERROR "assertRekeyStatus requires: [$required]," \
+                    "received: ${key_arr[*]}"
+                return 1
+            fi
+        done
+
+        required="$( echo "$data" | jq -r "$jscript" )"
+
+        index=0
+        error=0
+        while [ "$index" -lt "${#servers[@]}" ]; do
+            server="${servers[$index]}"
+            index=$((index+1))
+            server="${server}.$POD_TARGET_BASE"
+            NO_HEADER=true \
+            API_TMOUT=$API_REKEY_QUERY_TMOUT \
+            vaultAPI response GET "$server" "$endpoint"
+            if [ $? -ne 0 -o -z "$response" ]; then
+                # failing the REST API call is not the same
+                # as non-conformance
+                return 2
+                continue
+            fi
+
+            record="$( echo "$response" | jq -r "$jscript" )"
+            if [ "$record" != "$required" ]; then
+                log $ERROR "$server does not conform to:" \
+                    "$( echo "$data" | jq -c '.' )"
+                log $DEBUG "$server does not confirm: $response"
+                error=1
+                continue
+            fi
+            log $DEBUG "$server conforms: $response"
+        done
+
+        return $error
+    }
+
+    # Test whether the vault server(s) agree about rekey status
+    #
+    # The parameter is the quoted string of json data to pass to
+    # assertRekeyStatus
+    #
+    # Returns the normal linux success=0, failure!=0
+    function assertServerStatus {
+        local reference="$1"
+        local pods
+        local count
+
+        pods="$( getVaultPods | awk '{print $2}' )"
+        count="$( echo $pods | wc -w )"
+        if [ "$count" -ne "$HA_REPLICAS" ]; then
+            log $ERROR "server without IP does not conform"
+            return 1
+        fi
+        assertRekeyStatus "/sys/rekey/init" "$reference" $pods
+    }
+
+    # Test whether the vault server(s) agree about rekey validation
+    # status.  Warn when the active vault server changes
+    #
+    # The parameter is the quoted string of json data to pass to
+    # assertRekeyStatus
+    #
+    # Returns the normal linux success=0, failure!=0
+    function assertVerifyStatus {
+        local reference="$1"
+        local response
+        local pods
+        local result
+        local count
+
+        # first assert the rekey status; /sys/rekey/verify returns
+        # error if a server does not have rekey in progress
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_QUERY_TMOUT \
+        vaultAPI response GET $ACTIVE_TARGET /sys/rekey/init
+        result=$?
+        if [ "$result" -ne 0 ]; then
+            return $result
+        fi
+        assertServerStatus "$response"
+        result=$?
+        if [ $result -ne 0 ]; then
+            return $result
+        fi
+
+        pods="$( getVaultPods | awk '{print $2}' )"
+        count="$( echo $pods | wc -w )"
+        if [ "$count" -ne "$HA_REPLICAS" ]; then
+            log $ERROR "server without IP does not conform"
+            return 1
+        fi
+        assertRekeyStatus "/sys/rekey/verify" "$reference" $pods
+    }
+
+    # Assert that the /sys/rekey/init endpoint reports no
+    # rekey procedure in progress on any server
+    #
+    # Returns the normal linux success=0, failure!=0
+    function assertNoRekey {
+        local data
+
+        data='{"nonce": "", "started": false, "progress": 0'
+        data="$data"', "verification_required": false}'
+        assertServerStatus "$data"
+    }
+
+    # Retrieve the rekey status from active vault server
+    # and assert that all server conform to the status
+    #
+    # Returns the normal linux success=0, failure!=0
+    function assertServersConform {
+        local response
+        local value
+        local result
+        local pods
+        local count
+
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_QUERY_TMOUT \
+        vaultAPI response GET $ACTIVE_TARGET /sys/rekey/init
+        if [ $? -ne 0 ]; then
+            # cannot check conformance
+            log $ERROR "Cannot check server conformance to" \
+                "/sys/rekey/init"
+            return 2
+        fi
+
+        assertServerStatus "$response"
+        result="$?"
+        if [ "$result" -ne 0 ]; then
+            return $result
+        fi
+
+        value="$( echo "$response" | jq -r '.verification_nonce' )"
+        if [ -z "$value" -o "$value" == "null" ]; then
+            return 0
+        fi
+
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_QUERY_TMOUT \
+        vaultAPI response GET $ACTIVE_TARGET /sys/rekey/verify
+        if [ $? -ne 0 ]; then
+            # cannot check conformance
+            log $ERROR "Cannot check server conformance to" \
+                "/sys/rekey/verify"
+            return 2
+        fi
+
+        pods="$( getVaultPods | awk '{print $2}' )"
+        count="$( echo $pods | wc -w )"
+        if [ "$count" -ne "$HA_REPLICAS" ]; then
+            log $ERROR "server without IP does not conform"
+            return 1
+        fi
+        assertRekeyStatus "/sys/rekey/verify" "$response" $pods
+    }
+
+    # This function is used during the pre-rekey assertions
+    # Testing if the main loop (via PODREC_F) indicates a server
+    # is not running.
+    function allServersRunning {
+        local records
+        local count
+
+        records="$( grep "^/sva-vault" "$PODREC_F" )"
+        count="$( awk -F/ '{print $2}' <<<"$records" | wc -w )"
+        if [ "$count" -ne "$HA_REPLICAS" ]; then
+            return 1
+        fi
+        return 0
+    }
+
+    # This function is used during the pre-rekey assertions
+    # Testing if the main loop (via PODREC_F) indicates a server
+    # is sealed
+    function allServersUnsealed {
+        local records
+        local count
+
+        records="$( grep "^/sva-vault" "$PODREC_F" )"
+        count="$( grep "/false/" <<<"$records" \
+            | awk -F/ '{print $2}' | wc -w )"
+        if [ "$count" -ne "$HA_REPLICAS" ]; then
+            return 1
+        fi
+
+        return 0
+    }
+
+    # This function is used during the pre-rekey assertions
+    # Testing if the main loop (via PODREC_F) indicates a server
+    # omits IP address
+    function allServersHaveIP {
+        local records
+        local count
+
+        records="$( grep "^/sva-vault" "$PODREC_F" )"
+        count="$( echo "$records" | awk -F/ '{print $3}' | wc -w )"
+        if [ "$count" -ne "$HA_REPLICAS" ]; then
+            return 1
+        fi
+        return 0
+    }
+
+    # Test the status of rekey procedure 'started' during pre-rekey
+    # tests for procedure progress selection (sharing a single vaultAPI
+    # call to GET /sys/rekey/init
+    #
+    # Return linux true (0) if the status of /sys/rekey/init includes
+    # started == true
+    #
+    # Optional argument --not inverts the logic, but maintains
+    #   error response 2
+    function assertRekeyStarted {
+        local started
+        local not="$1"
+
+        # assert that a rekey is in progress
+        started="$( echo "$REKEY_STATUS_JSON" | jq -r '.started' )"
+        if [ "$started" == "true" ]; then
+            started=0
+        elif [ "$started" != "false" ]; then
+            # the rekey status is unclear
+            # an error is probably printed
+            log $DEBUG "unclear response for /sys/rekey/init:" \
+                "$( jq -c <<<"$REKEY_STATUS_JSON" )"
+            return 2
+        else
+            started=1
+        fi
+
+        if [ "$started" -eq 0 ]; then
+            if [ "$not" == "--not" ]; then
+                return 1
+            fi
+            return 0
+        fi
+        if [ "$not" == "--not" ]; then
+            return 0
+        fi
+        return 1
+    }
+
+    # Delete the shard secrets with speficied prefix
+    #
+    # The secrets are deleting on a single kubectl command
+    function deleteShardSecrets {
+        local prefix="$1"
+        local i
+        local list=''
+
+        for i in $( seq 0 $((KEY_SECRET_SHARES-1)) ); do
+            if [ -n "$( secretExists "${prefix}-$i" )" ]; then
+                list="$list ${prefix}-$i"
+            fi
+        done
+        if [ -n "$list" ]; then
+            deleteSecrets $list
+            return $?
+        fi
+        return 0
+    }
+
+    # Make a copy of the shard secrets with specified prefix
+    #
+    # The calling function needs to verify the result
+    function copyShardSecrets {
+        local from="$1"
+        local to="$2"
+        local i
+
+        for i in $( seq 0 $((KEY_SECRET_SHARES-1))); do
+            get_secret "${from}-$i" \
+            | set_secret "${to}-$i" /dev/stdin
+            if [ $? -ne 0 ]; then
+                # don't try anything else
+                log $ERROR "Failed to copy ${from}-$i to ${to}-$i"
+                break
+            fi
+        done
+    }
+
+    # Just log the content of cluster-rekey-request again
+    #
+    # Keeps track of whether vault-manager has been restarted
+    # with REKEY_STARTED variable, so that the rekey procedure
+    # status is documented in log
+    function rekeyResuming {
+        if [ "$REKEY_STARTED" -ne 0 ]; then
+            log $INFO "Resuming rekey:" \
+                "$( get_secret cluster-rekey-request )"
+            REKEY_STARTED=0
+        fi
+    }
+
+    # Return linux true (0) if a rekey is requested and the vault
+    # server pods are in a stable condition
+    #
+    # If the vault servers are not "stable" then the rekey operation
+    # needs that stability first.  vault-manager's main runStateMachine
+    # will monitor pods and restore unsealed status.
+    function needsRekey {
+        local pods
+        local sealed
+        local response
+
+        secretExists cluster-rekey-request >/dev/null
+        if [ $? -ne 0 ]; then
+            # rekey is not requested
+            return 1
+        fi
+
+        # progress the rekey procedure only if the servers are all
+        # running
+        if ! allServersRunning; then
+            log $INFO "Rekey: wait for vault servers to equal" \
+                "$HA_REPLICAS"
+            return 1
+        fi
+
+        # progress the rekey procedure only if the servers were
+        # previously unsealed.
+        if ! allServersUnsealed; then
+            log $INFO "Rekey: wait for unsealed vault servers to" \
+                "equal $HA_REPLICAS"
+            return 1
+        fi
+
+        # progress the rekey procedure only if the servers all have
+        # DNS names (IP addresses) provided by k8s
+        if ! allServersHaveIP; then
+            log $INFO "Rekey: wait for $HA_REPLICAS vault servers" \
+                "to have IP addresses"
+            return 1
+        fi
+
+        # The above three tests are based on output of kubectl get pods
+        # command. Doublecheck with REST API call to each server
+        pods="$( getVaultPods | grep "^sva-vault" | awk '{print $2}' )"
+        for pod in $pods; do
+            NO_HEADER=true \
+            API_TMOUT=$QUERY_TMOUT \
+            vaultAPI response GET ${pod}.$POD_TARGET_BASE /sys/health
+            if [ $? -ne 0 ]; then
+                log $ERROR "$pod fails health check during rekey"
+                return 1
+            fi
+            sealed="$( echo "$response" | jq -r '.sealed' )"
+            if [ "$sealed" != "false" ]; then
+                log $ERROR "$pod is sealed during rekey"
+                return 1
+            fi
+        done
+
+        assertServersConform
+        return $?
+    }
+
+    # Return linux true (0) if the current step of the rekey procedure
+    # is to send initialize request to /sys/rekey/int
+    #
+    # Initialize is the first step
+    #
+    # Will not begin initialization if there are stale cluster-rekey or
+    # cluster-key-bk secrets
+    function needsInitialization {
+        local progress
+        local count
+        local error=0
+
+        assertRekeyStarted --not
+        progress=$?
+        if [ "$progress" -ne 0 ]; then
+            return "$progress"
+        fi
+
+        # normally should not need to check, but useful when
+        # running manually
+        secretsExistAny cluster-rekey-verified \
+            cluster-rekey-shuffle \
+            cluster-rekey-audit
+        if [ $? -eq 0 ]; then
+            log $WARNING "Check initialization out of order"
+            return 1
+        fi
+
+        # make assertions about the artifacts left behind by previous
+        # rekey procedure attempts
+        # assert that there are no stale keys before starting rekey
+        assertShardSecrets cluster-rekey --nokeys
+        count=$?
+        if [ "$count" -ne 0 ]; then
+            log $ERROR "Stale cluster-rekey secrets ($count) present"
+            # there was a possibility that vault had cancelled the rekey
+            # due to active server failure, so fall through to
+            # rekeyRecovery
+            return 1
+        fi
+
+        assertShardSecrets cluster-key-bk --nokeys
+        count=$?
+        if [ "$count" -ne 0 ]; then
+            log $ERROR "cluster-key-bk secrets ($count) present"
+            return 2
+        fi
+
+        return 0
+    }
+
+    # Start the rekey procedure
+    #
+    # Send initialize request to /sys/rekey/int
+    #
+    # Initialize is the first step
+    #
+    # Will not begin initialization if there are stale cluster-rekey or
+    # cluster-key-bk secrets
+    function rekeyInitialize {
+        local shares
+        local threshold
+        local verify
+        local data
+        local response
+        local value
+
+        log $INFO "Initializing vault rekey"
+
+        REKEY_STARTED=0
+
+        shares='"secret_shares": '$KEY_SECRET_SHARES
+        threshold='"secret_threshold": '$KEY_REQUIRED_THRESHOLD
+        verify='"require_verification": true'
+        data="{$shares,$threshold,$verify}"
+
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_OP_TMOUT \
+        vaultAPI response POST $ACTIVE_TARGET /sys/rekey/init "$data"
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+
+        value="$( echo "$response" | jq -r ".started" )"
+        if [ 'false' == "$value" ]; then
+            log $ERROR "Rekey not started"
+            return 1
+        fi
+
+        # log the nonce
+        value="$( echo "$response" | jq -r ".nonce" )"
+        verify="$( echo "$response" | jq -r ".verification_required" )"
+        log $INFO "Rekey started: $value" \
+            "(verification_required==$verify)"
+
+        # just a sanity check
+        if [ 'true' != "$verify" ]; then
+            log $ERROR "Rekey started without verification_required:" \
+                "aborting"
+            NO_HEADER=true \
+            API_TMOUT=$API_REKEY_OP_TMOUT \
+            vaultAPI response DELETE $ACTIVE_TARGET /sys/rekey/init
+            return 1
+        fi
+
+        assertServerStatus "$response"
+        return $?
+    }
+
+    # The rekey authentication should happen when
+    #  - there is a rekey in progress
+    #  - there is a verification_nonce
+    #
+    # Authentication of the rekey request is the second step
+    #
+    # Omit rekey verification if:
+    #  - there are existing cluster-rekey secrets
+    #  - Verification is complete: cluster-rekey-verified or any later
+    #    stage is complete
+    #
+    # Return linux true (0) if the current stage of rekey
+    # is to complete the rekey verification
+    # Return linux true (0) if the current stage of rekey
+    # is to authentication the rekey request
+    function needsAuthentication {
+        local progress
+
+        assertRekeyStarted
+        progress=$?
+        if [ "$progress" -ne 0 ]; then
+            return "$progress"
+        fi
+
+        progress="$( echo "$REKEY_STATUS_JSON" \
+            | jq -r '.verification_nonce' )"
+        if ! [ -z "$progress" -o "$progress" == "null" ]; then
+            # There is a rekey in progress with a verification nonce
+            # pass through to recovery
+            return 1
+        fi
+
+        # this check should not be necessary
+        assertShardSecrets cluster-rekey --nokeys
+        if [ $? -ne 0 ]; then
+            # There are already cluster-rekey secrets
+            return 1
+        fi
+
+        # normally should not need to check, but useful when
+        # running manually
+        secretsExistAny cluster-rekey-verified \
+            cluster-rekey-shuffle \
+            cluster-rekey-audit
+        if [ $? -eq 0 ]; then
+            log $WARNING "Check authentication out of order"
+            return 1
+        fi
+
+        return $?
+    }
+
+    # Submits a keyshard for the rekey procedure
+    # Returns 0 on success
+    # Returns 1 on failure
+    # Returns KEY_SECRET_SHARES when authentication completes
+    function rekeySubmitShard {
+        local nonce="$1"
+        local index="$2"
+        local verifyauth="$3"
+        local prefix="$4"
+        local shard
+        local dnonce
+        local key
+        local data
+        local response
+        local progress
+        local root_token
+        local new_doc
+
+        if [ -z "$prefix" ]; then
+            prefix=cluster-key
+        fi
+
+        shard="$( get_secret "${prefix}-$index" | jq -r .keys[0] )"
+        dnonce='"nonce": "'$nonce'"'
+        key='"key": "'$shard'"'
+        data="{$dnonce,$key}"
+
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_OP_TMOUT \
+        vaultAPI response POST $ACTIVE_TARGET /sys/rekey/update "$data"
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+
+        # Check the response for verification_nonce, which
+        # indicates completion
+        progress="$( echo "$response" | jq -r '.verification_nonce' )"
+        if [ -n "$progress" -a "$progress" != 'null' ]; then
+            log $INFO "Success authenticating:" \
+                "$((index+1)) of $KEY_REQUIRED_THRESHOLD"
+
+            if [ "$verifyauth" == "--verify-auth" ]; then
+                # delete the rekey and return success
+                NO_HEADER=true \
+                API_TMOUT=$API_REKEY_OP_TMOUT \
+                vaultAPI response DELETE $ACTIVE_TARGET /sys/rekey/init
+                return "$KEY_SECRET_SHARES"
+            fi
+
+            # Procedure to ensure that the old and new shards are
+            # secured in k8s secrets.  Deletion of old shards will only
+            # occur when verification is successful.
+            root_token="$( get_secret cluster-key-root )"
+            new_doc="$( echo "$response" \
+                | jq -c '{"keys": .keys,
+                    "keys_base64": .keys_base64,
+                    "root_token": "'"$root_token"'"}' )"
+            # store the new shards
+            echo "$response" \
+            | jq -c '{"keys": .keys, "keys_base64": .keys_base64}' \
+            | storeVaultInitSecrets cluster-rekey
+
+            # check that the secrets match vault's rekey response
+            echo "$new_doc" | validateSecrets cluster-rekey
+            if [ $? -ne 0 ]; then
+                # calling function will abort the rekey
+                # and any cluster-rekey secrets
+                log $ERROR "Failed to store and verify shards" \
+                    "after rekey authentication complete"
+                return 1
+            fi
+
+            # authentication of the rekey request is completed
+            # successfully
+            log $INFO "Rekey authentication successful"
+            return "$KEY_SECRET_SHARES"
+        fi
+
+        # Otherwise verify the response
+        progress="$( echo "$response" | jq -r '.progress' )"
+        index="$((index+1))"
+        if [ "$progress" -ne "$index" ]; then
+            log $ERROR "Authentication sequence mismatching" \
+                "($progress, $index)"
+            return 1
+        fi
+
+        # assert that the servers agree
+        assertServerStatus "$response"
+        if [ $? -ne 0 ]; then
+            log $ERROR "Vault server rekey status fails during" \
+                "authentication at $index of $KEY_REQUIRED_THRESHOLD"
+            return 1
+        fi
+
+        log $INFO "Success authenticating:" \
+            "$index of $KEY_REQUIRED_THRESHOLD"
+        return 0
+    }
+
+    # Return linux true (0) if the current step of the rekey procedure
+    # is to authenticate the request
+    #
+    # Authentication of the rekey request is the second step
+    #
+    function rekeyAuthenticate {
+        local verifyauth="$1"
+        local prefix="$2"
+        local response
+        local index
+        local value
+        local nonce
+        local progress
+        local result
+
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_QUERY_TMOUT \
+        vaultAPI response GET $ACTIVE_TARGET /sys/rekey/init
+        if [ $? -ne 0 ]; then
+            # an error is already printed
+            return 1
+        fi
+
+        value="$( echo "$response" | jq -r '.started' )"
+        if [ 'true' != "$value" ]; then
+            log $ERROR "Rekey authentication, but rekey not in progress"
+            return 1
+        fi
+
+        nonce="$( echo "$response" | jq -r '.nonce' )"
+        progress="$( echo "$response" | jq -r '.progress' )"
+        if ! [[ "$progress" =~ ^[0-9]{1,}$ ]]; then
+            log $ERROR "Rekey authentication progress not integer:" \
+                "$response"
+            return 1
+        elif [ "$progress" -ge "$KEY_SECRET_SHARES" ]; then
+            log $ERROR "Rekey authentication progress out of range:" \
+                "$response"
+            return 1
+        fi
+
+        if [ "$progress" -ne 0 ]; then
+            log $WARNING "Continue authenticating rekey at: $progress"
+        fi
+
+        # authenticate and store the new keys
+        for index in $( seq $progress $((KEY_SECRET_SHARES-1)) ); do
+            rekeySubmitShard "$nonce" "$index" $verifyauth $prefix
+            result="$?"
+            if [ "$result" -eq "$KEY_SECRET_SHARES" ]; then
+                # start the verify procedure now
+                if [ "$verifyauth" != "--verify-auth" ]; then
+                    log $INFO "Starting rekey verify"
+                fi
+                break
+            elif [ "$result" -ne 0 ]; then
+                return $result
+            fi
+        done
+        return 0
+    }
+
+    # The rekey verification should happen when
+    #  - there is a rekey in progress
+    #  - there is a verification_nonce
+    #
+    # Omit rekey verification if:
+    #  - there are existing cluster-rekey secrets
+    #  - Verification is complete: cluster-rekey-verified or any later
+    #    stage is complete
+    #
+    # Return linux true (0) if the current stage of rekey
+    # is to complete the rekey verification
+    function needsVerify {
+        local progress
+
+        assertRekeyStarted
+        progress=$?
+        if [ "$progress" -ne 0 ]; then
+            return "$progress"
+        fi
+
+        progress="$( echo "$REKEY_STATUS_JSON" \
+            | jq -r '.verification_nonce' )"
+        if [ -z "$progress" -o "$progress" == "null" ]; then
+            # There is a rekey in progress, but not with a
+            # verification nonce
+            return 1
+        fi
+
+        # Assert that the nonce is UUID-ish
+        if ! [[ "$progress" =~ ^[a-f0-9-]{36}$ ]]; then
+            log $ERROR "The verification_nonce is not UUID-ish:" \
+                "$REKEY_STATUS_JSON"
+            return 2
+        fi
+
+        assertShardSecrets cluster-rekey
+        if [ $? -ne 0 ]; then
+            # this should not happen: verify in progress but no
+            # cluster-rekey secrets
+            log $ERROR "rekey verify in progress but no cluster-rekey"
+            return 1
+        fi
+
+        # normally should not need to check, but useful when
+        # running manually
+        secretsExistAny cluster-rekey-verified \
+            cluster-rekey-shuffle \
+            cluster-rekey-audit
+        if [ $? -eq 0 ]; then
+            log $WARNING "Check verify out of order"
+            return 2
+        fi
+
+        return 0
+    }
+
+    # Submits a keyshard for the rekey verification procedure
+    # Returns 0 on success
+    # Returns 1 on failure
+    # Returns KEY_REQUIRED_THRESHOLD when authentication completes
+    function rekeyVerifySubmitShard {
+        local nonce="$1"
+        local index="$2"
+        local shard
+        local dnonce
+        local key
+        local data
+        local response
+        local progress
+
+        shard="$( get_secret cluster-rekey-$index \
+            | jq -r .keys[0] )"
+        dnonce='"nonce": "'$nonce'"'
+        key='"key": "'$shard'"'
+        data="{$dnonce,$key}"
+
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_OP_TMOUT \
+        vaultAPI response POST $ACTIVE_TARGET \
+            /sys/rekey/verify "$data"
+        if [ $? -ne 0 ]; then
+            # an error is printed
+            return 1
+        fi
+
+        progress="$( echo "$response" | jq -r ".complete" )"
+        if [ "$progress" == 'true' ]; then
+            log $INFO "Success verifying: using new shards"
+            set_secret cluster-rekey-verified /dev/stdin \
+                <<<"$( get_secret cluster-rekey-request )"
+            return $KEY_REQUIRED_THRESHOLD
+        fi
+        progress="$( echo "$response" | jq -r ".progress" )"
+        if [ -z "$progress" -o "$progress" == "null" ]; then
+            log $ERROR "Expecting rekey verify progress" \
+                "[$((index+1))] instead of [$progress]"
+            return 1
+        fi
+        # Print the progress of rekey verify.
+        if [ "$((index+1))" -eq "$progress" ]; then
+            log $INFO "Success verifying:" \
+                "$progress of $KEY_REQUIRED_THRESHOLD"
+        elif [ "$((index+1))" -gt "$progress" ]; then
+            # A sanity check only
+            log $WARNING "Verify progress [$progress] less" \
+                "than expected [$((index+1))]"
+        else
+            # A sanity check only
+            log $WARNING "Verify progress [$progress]" \
+                "greater than expected [$((index+1))]"
+        fi
+        assertVerifyStatus "$response"
+        if [ $? -ne 0 ]; then
+            log $ERROR "Vault server verify status fails during" \
+                "authentication at" \
+                "$index of $KEY_REQUIRED_THRESHOLD"
+            return 1
+        fi
+    }
+
+    # Return linux true (0) if the current step of the rekey procedure
+    # is to verify shard secrets
+    #
+    # This step confirms that vault manager has correctly stored the
+    # shards received from the vault server.  This allows failures of
+    # the procedure to be recovered:
+    #   - receive the shards from vault
+    #   - store the shards in k8s secrets
+    #   - play the shards back to vault
+    #   - upon successful verification the new shards are effective
+    #
+    # Verification of the rekey request is the Third step
+    #
+    function rekeyVerify {
+        local value
+        local nonce
+        local progress
+        local response
+        local shard
+        local dnonce
+        local key
+        local data
+        local index
+
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_QUERY_TMOUT \
+        vaultAPI response GET $ACTIVE_TARGET /sys/rekey/verify
+        if [ $? -ne 0 ]; then
+            # an error is already printed
+            return 1
+        fi
+
+        value="$( echo "$response" | jq -r '.started' )"
+        if [ 'true' != "$value" ]; then
+            log $ERROR "Rekey verify, but rekey not in progress"
+            return 1
+        fi
+
+        nonce="$( echo "$response" | jq -r '.nonce' )"
+        progress="$( echo "$response" | jq -r '.progress' )"
+        if ! [[ "$progress" =~ ^[0-9]{1,}$ ]]; then
+            log $ERROR "Rekey authentication progress not integer:" \
+                "$response"
+            return 1
+        elif [ "$progress" -ge "$KEY_SECRET_SHARES" ]; then
+            log $ERROR "Rekey authentication progress out of range:" \
+                "$response"
+            return 1
+        fi
+        if [ "$progress" -ne 0 ]; then
+            log $WARNING "Continue verifying rekey at: $progress"
+        fi
+
+        # assert that the servers agree on verify status
+        assertVerifyStatus "$response"
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+
+        # authenticate the verify procedure
+        for index in $( seq $progress $((KEY_SECRET_SHARES-1)) ); do
+            rekeyVerifySubmitShard "$nonce" "$index"
+            result=$?
+            if [ "$result" -eq "$KEY_REQUIRED_THRESHOLD" ]; then
+                # rekeyVerifySubmitShard returns KEY_REQUIRED_THRESHOLD
+                # when .complete == true was received
+                return 0
+            elif [ "$result" -ne 0 ]; then
+                # any other non-zero result is a failure
+                return 1
+            fi
+        done
+
+        log $ERROR "Verify procedure ended without completion"
+        return 1
+    }
+
+    # The shuffling of keys shards in k8s secrets should happen when
+    # th cluster-rekey-verified procedure step is completed.
+    #
+    # Omit shuffling if:
+    #  - vault server reports rekey in progress (unclear status)
+    #  - shuffling is already complete: cluster-rekey-shuffle or later
+    #    stage is complete
+    #  - there are no cluster-rekey secrets
+    #  - there are cluster-key-bk secrets
+    #
+    # Return linux true (0) if the current stage of rekey
+    # is to complete the swapping of validated shards
+    function needsShuffle {
+        local progress
+
+        # assert that a rekey is not in progress
+        assertRekeyStarted --not
+        progress=$?
+        if [ "$progress" -ne 0 ]; then
+            return "$progress"
+        fi
+
+        assertShardSecrets cluster-rekey
+        case $? in
+            0)
+                # There is no rekey in progress, and there is a set
+                # of cluster-rekey shards recorded
+                ;;
+            $KEY_SECRET_SHARES)
+                # There is no rekey in progress, and there are no
+                # cluster-rekey shards recorded
+                return 1
+                ;;
+            *)
+                log $ERROR "The number key shared secrets for" \
+                    "cluster-rekey is not complete"
+                return 2
+                ;;
+        esac
+
+        secretExists cluster-rekey-verified >/dev/null
+        if [ $? -ne 0 ]; then
+            # is it possible that the vault server cancelled the rekey
+            # request?
+            # There is no rekey in progress, and there is a set of
+            # cluster-rekey secrets, but vault-manager hasn't verified
+            #
+            # Or did vault-manager exit unexpectedly
+            return 1
+        fi
+
+        # normally should not need to check, but useful when
+        # running manually
+        secretsExistAny cluster-rekey-shuffle \
+            cluster-rekey-audit
+        if [ $? -eq 0 ]; then
+            log $WARNING "Check cluster-key shuffle out of order"
+            return 2
+        fi
+
+        # otherwise allow rekeyShuffleKeys to be re-entrant to
+        # the existance of or lack of cluster-key and cluster-key-bk
+        # cluster-rekey is only deleted when confirmed to be copied to
+        # cluster-key
+        return 0
+    }
+
+    # This procedure shuffles the shard secrets from cluster-rekey to
+    # cluster-key to cluster-bk
+    #
+    # The function intends to be resolve failures of the vault manager
+    # process where it is interrupted abruptly such as with kill -9.
+    # In combination with needsShuffle it can be re-run until it
+    # completes the shuffle:
+    #  - cluster-key shards are copied to cluster-key-bk
+    #  - cluster-key shards are delete
+    #  - cluster-rekey is copied to cluster-key
+    #  - cluster-rekey is delete
+    #
+    # A subsequent step audits the new keys before deleting the
+    # cluster-key-bk secrets
+    function rekeyShuffleKeys {
+        local key_exists
+        local rekey_exists
+        local bk_exists
+        local key_doc=""
+        local rekey_doc=""
+
+        assertShardSecrets cluster-key
+        key_exists=$?
+        assertShardSecrets cluster-rekey
+        rekey_exists=$?
+        assertShardSecrets cluster-key-bk
+        bk_exists=$?
+
+        if [ "$key_exists" -eq 0 ]; then
+            key_doc="$( reconstructInitResponse cluster-key )"
+            echo "$key_doc" | validateSecrets cluster-key
+            if [ $? -ne 0 ]; then
+                log $ERRROR "Failed to read cluster-key"
+                return 1
+            fi
+        fi
+
+        if [ "$rekey_exists" -eq 0 ]; then
+            rekey_doc="$( reconstructInitResponse cluster-rekey )"
+            echo "$rekey_doc" | validateSecrets cluster-rekey
+            if [ $? -ne 0 ]; then
+                log $ERROR "Failed to read cluster-rekey"
+                return 1
+            fi
+        else
+            # this is recovery path
+            if [ -n "key_doc" ]; then
+                log $WARNING "Progress cluster-rekey-shuffle without" \
+                    "cluster-rekey"
+                set_secret cluster-rekey-shuffle /dev/stdin \
+                    <<<"$( get_secret cluster-rekey-request )"
+                return
+            fi
+            log $ERROR "No cluster-key or cluster-rekey"
+            return 1
+        fi
+
+        if [ "$bk_exists" -lt "$KEY_SECRET_SHARES" \
+            -a "$bk_exists" -ne 0 ]; then
+            # this is a recovery path
+            # an incomplete copy of cluster-key secrets
+            if [ -n "$key_doc" ]; then
+                deleteShardSecrets cluster-key-bk
+                assertShardSecrets cluster-key-bk
+                bk_exists=$?
+                if [ "$bk_exists" -lt "$KEY_SECRET_SHARES" ]; then
+                    log $ERROR "Failed to delete incomplete" \
+                        "cluster-key-bk"
+                    return 1
+                fi
+            else
+                # this shouldn't happen;
+                # either not both failures is anticipated
+                log $ERROR "Sanity: incomplete both cluster-key-bk" \
+                    "and missing/incomplete cluster-key secrets"
+                return 1
+            fi
+        fi
+        if [ "$bk_exists" -eq 0 ]; then
+            # this is a recovery path
+            if [ -n "$key_doc" ]; then
+                # Assert that cluster-key and cluster-key-bk are the
+                # same
+                log $INFO "Recovering from pre-existing cluster-key-bk"
+                echo "$key_doc" | validateSecrets cluster-key-bk
+                if [ $? -eq 0 ]; then
+                    # cluster-key-bk == cluster-key
+                    deleteShardSecrets cluster-key
+                    assertShardSecrets cluster-key
+                    key_exists=$?
+                    key_doc=""
+                else
+                    echo "$key_doc" | validateSecrets cluster-rekey
+                    if [ $? -eq 0 ]; then
+                        # Recovering cluster-key == cluster-rekey
+                        log $INFO "Recovering with cluster-key"
+                        deleteShardSecrets cluster-rekey
+                        set_secret cluster-rekey-shuffle /dev/stdin \
+                            <<<"$( get_secret cluster-rekey-request )"
+                        return 0
+                    else
+                        log $ERROR "Three different sets of keys" \
+                            "in k8s secrets"
+                        return 1
+                    fi
+                fi
+            fi
+            # else: there is no cluster-key to backup
+        else
+            # this is the normal procedure path
+            log $INFO "Copying cluster-key secrets to cluster-key-bk"
+            copyShardSecrets cluster-key cluster-key-bk
+            echo "$key_doc" | validateSecrets cluster-key-bk
+            if [ $? -ne 0 ]; then
+                log $ERROR "Failed to copy cluster-key to cluster-key-bk"
+                deleteShardSecrets cluster-key-bk
+                return 1
+            fi
+            deleteShardSecrets cluster-key
+            if [ $? -ne 0 ]; then
+                log $ERROR "Failed to delete cluster-key secrets"
+                return 1
+            fi
+            assertShardSecrets cluster-key
+            key_exists=$?
+            key_doc=""
+        fi
+
+        # cluster-key-bk exists here
+        # cluster-rekey rekey_doc is valid here
+
+        # if cluster-key exists, such as number of secrets less than
+        # KEY_SECRET_SHARES, then delete them; deleteShardSecrets is a
+        # no-op if there are none there
+        deleteShardSecrets cluster-key
+        if [ $? -ne 0 ]; then
+            log $ERROR "Failed to delete cluster-key"
+            return 1
+            # try again later
+        fi
+
+        log $INFO "Copying cluster-rekey secrets to cluster-key"
+        copyShardSecrets cluster-rekey cluster-key
+        echo "$rekey_doc" | validateSecrets cluster-key
+        if [ $? -ne 0 ]; then
+            log $ERROR "Failed to copy cluster-rekey to cluster-key"
+            return 1
+        fi
+
+        deleteShardSecrets cluster-rekey
+        set_secret cluster-rekey-shuffle /dev/stdin \
+            <<<"$( get_secret cluster-rekey-request )"
+
+        return 0
+    }
+
+    # The audit of cluster-key should happen when these other procedure
+    # steps are completed:
+    #  - cluster-rekey-verified
+    #  - cluster-rekey-shuffle
+    #
+    # Omit audit if:
+    #  - vault server reports rekey in progress (failed previous audit?)
+    #  - audit is already complete: cluster-rekey-audit exists
+    #
+    # Return linux true (0) if the current stage of rekey
+    # is to run the audit
+    function needsAudit {
+        local progress
+
+        # assert that a rekey is not in progress
+        assertRekeyStarted --not
+        progress=$?
+        if [ "$progress" -ne 0 ]; then
+            return "$progress"
+        fi
+
+        secretExists cluster-rekey-request >/dev/null
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+
+        secretExists cluster-rekey-verified >/dev/null
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+
+        secretExists cluster-rekey-shuffle >/dev/null
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+
+        secretExists cluster-rekey-audit >/dev/null
+        if [ $? -eq 0 ]; then
+            log $ERROR "rekey audit already completed"
+            return 1
+        fi
+
+        assertShardSecrets cluster-key
+        if [ $? -ne 0 ]; then
+            log $ERROR "rekey audit requested but cluster-keys absent"
+            return 1
+        fi
+    }
+
+    # Audit that the active vault server authenticates with the cluster
+    # keys specified by prefix
+    #
+    # Returns 0 on success
+    # Returns 1 if the audit failes
+    # Returns 2 if there was a failure unrelated to authentication
+    function rekeyAudit {
+        local prefix="$1"
+        local value
+        local response
+
+        if [ -z "$prefix" ]; then
+            prefix="cluster-key"
+        fi
+
+        log $INFO "Auditing the shards in $prefix secrets"
+        assertNoRekey
+        if [ $? -ne 0 ]; then
+            log $ERROR "Cannot audit with rekey in progress"
+            return 2
+        fi
+
+        assertShardSecrets "$prefix"
+        if [ $? -ne 0 ]; then
+            log $ERROR "Audit fails with absent $prefix secrets"
+            return 1
+        fi
+
+        rekeyInitialize
+        if [ $? -ne 0 ]; then
+            NO_HEADER=true \
+            API_TMOUT=$API_REKEY_OP_TMOUT \
+            vaultAPI response DELETE $ACTIVE_TARGET /sys/rekey/init
+            return 2
+        fi
+
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_QUERY_TMOUT \
+        vaultAPI response GET $ACTIVE_TARGET /sys/rekey/init
+        if [ $? -ne 0 ]; then
+            # There's no reason to believe this one will succeed where
+            # the other hadn't
+            NO_HEADER=true \
+            API_TMOUT=$API_REKEY_OP_TMOUT \
+            vaultAPI response DELETE $ACTIVE_TARGET /sys/rekey/init
+            return 2
+        fi
+
+        value="$( echo "$response" | jq -r ".verification_required" )"
+        if [ "$value" != "true" ]; then
+            log $ERROR "Audit sanity: verification_required not set:" \
+                "$response"
+            NO_HEADER=true \
+            API_TMOUT=$API_REKEY_OP_TMOUT \
+            vaultAPI response DELETE $ACTIVE_TARGET /sys/rekey/init
+            return 1
+        fi
+
+        rekeyAuthenticate --verify-auth "$prefix"
+        result="$?"
+        if [ "$result" -eq 0 ]; then
+            log $INFO "Audit of cluster-key secrets passes"
+        else
+            NO_HEADER=true \
+            API_TMOUT=$API_REKEY_OP_TMOUT \
+            vaultAPI response DELETE $ACTIVE_TARGET /sys/rekey/init
+        fi
+
+        return $result
+    }
+
+    # clean up the artifacts from rekey procedure
+    # The audit procedure proves the shards in cluster-key
+    # secrets will unseal the vault.
+    function finalizeRekey {
+        local secrettext
+        secrettext="$( get_secret cluster-rekey-request )"
+
+        log $INFO "removing artifacts of the rekey procedure"
+        assertShardSecrets cluster-rekey --nokeys
+        if [ $? -ne 0 ]; then
+            log $WARNING "removing cluster-rekey secrets" \
+                "after audit"
+            deleteShardSecrets cluster-rekey
+        fi
+        deleteShardSecrets cluster-key-bk
+        deleteSecrets cluster-rekey-request \
+            cluster-rekey-verified \
+            cluster-rekey-shuffle \
+            cluster-rekey-audit
+
+        log $INFO "Rekey request complete: $secrettext"
+    }
+
+    # This procedure handle a few cases where the vault active server or
+    # vault-manager were killed.
+    #
+    # - rekey authentication completed by vault-manager was killed
+    #   before the shards could be stored
+    # - rekey verification may be cancelled by the failure of the active
+    #   vault server
+    #
+    function rekeyRecovery {
+        local key_exists
+        local rekey_exists
+        local bk_exists
+        local verified_exists
+        local shuffle_exists
+        local audit_exists
+        local inprogress
+        local verifyprogress
+
+        log $INFO "Recovering the rekey procedure"
+
+        # assert that the vault server are all up and agree
+        # about the rekey status
+        allServersRunning \
+        && allServersHaveIP \
+        && allServersUnsealed \
+        || return 1
+
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_QUERY_TMOUT \
+        vaultAPI REKEY_STATUS_JSON GET $ACTIVE_TARGET /sys/rekey/init
+        if [ $? -ne 0 ]; then
+            # an error is printed
+            # wait for recovery
+            REKEY_STATUS_JSON=''
+            return 1
+        fi
+        assertServerStatus "$REKEY_STATUS_JSON"
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+
+        inprogress="$( echo "$REKEY_STATUS_JSON" | jq -r '.started' )"
+        verifyprogress="$( echo "$REKEY_STATUS_JSON" \
+            | jq -r '.verification_nonce' )"
+        if [ "$inprogress" == "true" ]; then
+            # If a rekey is in progress, then cancel it
+            log $INFO "Cancelling rekey in progress"
+            NO_HEADER=true \
+            API_TMOUT=$API_REKEY_OP_TMOUT \
+            vaultAPI response DELETE $ACTIVE_TARGET /sys/rekey/init
+            if [ $? -ne 0 ]; then
+                # retry later
+                return 1
+            fi
+        fi
+
+        assertShardSecrets cluster-key
+        key_exists=$?
+        assertShardSecrets cluster-rekey
+        rekey_exists=$?
+        assertShardSecrets cluster-key-bk
+        bk_exists=$?
+
+        secretExists cluster-rekey-verified >/dev/null
+        verified_exists=$?
+        secretExists cluster-rekey-shuffle >/dev/null
+        shuffle_exists=$?
+        secretExists cluster-rekey-audit >/dev/null
+        audit_exists=$?
+
+        # Handle condition where secrets were shuffled but vault-manager
+        # failed before recording the milestone cluster-rekey-shuffle
+        if [ "$verified_exists" -eq 0 \
+            -a "$shuffle_exists" -ne 0 ]; then
+            if [ "$rekey_exists" -eq "$KEY_SECRET_SHARES" ]; then
+                # auditRekey will double-check that cluster-key is
+                # in use
+                set_secret cluster-rekey-shuffle /dev/stdin \
+                    <<<"$( get_secret cluster-rekey-request )"
+                log $INFO "Continuing rekey procedure with audit" \
+                    "of cluster-key"
+                return
+            fi
+        fi
+
+
+        # Handle condition where verification is in progress but
+        # vault-manager did not store shards.  The rekey was canceled
+        # above
+        if [ "$inprogress" == "true" ]; then
+            if [ "$rekey_exists" -gt 0 ]; then
+                # cluster-rekey secrets do not exist or
+                # partial set exists
+                secretsExistAny cluster-rekey-verified \
+                    cluster-rekey-shuffle \
+                    cluster-rekey-audit
+
+                if [ $? -ne 0 ]; then
+                    # the rekey procedure will restart
+                    if [ "$rekey_exists" -lt "$KEY_SECRET_SHARES" ]; then
+                        log $INFO "Deleting partial set of" \
+                            "cluster-rekey secrets"
+                        deleteShardSecrets cluster-rekey
+                    fi
+                    return
+                fi
+            fi
+        fi
+
+        # Handle condition where an active server fails during
+        # verification: vault may have cancelled the rekey procedure
+        if [ "$rekey_exists" -eq 0 \
+            -a "$verified_exists" -ne 0 ]; then
+
+            # This question is: which shards are the vault servers
+            # using?
+            log $INFO "Recovering from mismatch of cluster-rekey" \
+                "and verified status"
+
+            # Audit the existing shards to see which ones the
+            # vault servers are keyed for.
+            # Most likely that the verification failed due to
+            # active server failing, start with cluster-key
+            rekeyAudit cluster-key
+            if [ $? -eq 0 ]; then
+                # The rekey verification did not complete
+                # remove cluster-rekey secrets
+                # The rekey procedure should restart
+                deleteShardSecrets cluster-rekey
+                log $INFO "Restart rekey procedure"
+                return 0
+            fi
+
+            # this happens when vault-manager process is killed
+            rekeyAudit cluster-rekey
+            if [ $? -eq 0 ]; then
+                set_secret cluster-rekey-verified /dev/null \
+                    <<<$( get_secret cluster-rekey-request )
+                log $INFO "Continue rekey procedure with cluster-rekey"
+                return 0
+            fi
+
+            # try again later
+            return 1
+        fi
+        log $ERROR "Did not recover from current rekey status"
+    }
+
+    # The state machine for rekeying the vault server
+    #
+    # The overall procedure for rekey request includes:
+    # - wait for stability of vault servers
+    # - initialize the procedure
+    # - authenticate the rekey procedure by supplying shards
+    # - store the new shards
+    # - verify the rekey with the new shards read from k8s secrets
+    # - rotate the shard secrets:
+    #     cluster-rekey - cluster-key - cluster-key-bk
+    # - Audit the new shards with active vault server
+    # - Remove artifacts of rekey procedure:
+    #     cluster-key-bk, milestone secrets
+    #
+    function vaultRekey {
+        local records
+        local count
+        local result
+        local secrettext
+
+        if ! needsRekey; then
+            return
+        fi
+
+        # Retrieve and record the rekey status once for the tests that
+        # follow
+        NO_HEADER=true \
+        API_TMOUT=$API_REKEY_QUERY_TMOUT \
+        vaultAPI REKEY_STATUS_JSON GET $ACTIVE_TARGET /sys/rekey/init
+        if [ $? -ne 0 ]; then
+            # an error is printed
+            REKEY_STATUS_JSON=''
+            return
+        fi
+
+        needsAudit
+        case $? in
+            0)
+                rekeyResuming
+                rekeyAudit
+                if [ $? -eq 0 ]; then
+                    set_secret cluster-rekey-audit /dev/stdin \
+                        <<<$( get_secret cluster-rekey-request )
+
+                    finalizeRekey
+                fi
+                return
+                ;;
+            1)  # continue to procedure step
+                ;;
+            *)
+                # an error occurs for which the procedure should not
+                # continue
+                return
+                ;;
+        esac
+
+        needsShuffle
+        case $? in
+            0)
+                rekeyResuming
+                rekeyShuffleKeys
+                return
+                ;;
+            1)  # continue to procedure step
+                ;;
+            *)
+                # an error occurs for which the procedure should not
+                # continue
+                return
+                ;;
+        esac
+
+        needsVerify
+        case $? in
+            0)
+                rekeyResuming
+                rekeyVerify
+                return
+                ;;
+            1)  # continue to procedure step
+                ;;
+            *)
+                # an error occurs for which the procedure should not
+                # continue
+                return
+                ;;
+        esac
+
+        needsAuthentication
+        case $? in
+            0)
+                rekeyResuming
+                rekeyAuthenticate
+                return
+                ;;
+            1)  # continue to procedure step
+                ;;
+            *)
+                # an error occurs for which the procedure should not
+                # continue
+                return
+                ;;
+        esac
+
+        needsInitialization
+        case $? in
+            0)
+                secrettext="$( get_secret cluster-rekey-request )"
+                log $INFO "Rekey request started: $secrettext"
+                rekeyInitialize
+                return
+                ;;
+            1)  # continue to failure
+                ;;
+            *)
+                # an error occurs for which the procedure should not
+                # continue
+                return
+                ;;
+        esac
+
+        # falling through the case statements requires remediation
+        rekeyResuming
+        rekeyRecovery
     }
 
 
@@ -1206,7 +3030,7 @@ data:
     exit_on_trap 2
 
     log $DEBUG "Putting a list of vault pods and ip in $WORKDIR/pods.txt"
-    getVaultPods
+    getVaultPods > $WORKDIR/pods.txt
     exit_on_trap 3
 
     vaultInitialized
@@ -1220,7 +3044,7 @@ data:
         exit_on_trap 5
 
         log $INFO "Putting a list of vault pods and IPs in $WORKDIR/pods.txt"
-        getVaultPods
+        getVaultPods > $WORKDIR/pods.txt
         exit_on_trap 6
 
         log $DEBUG "Initializing the vault on vault-0 and" \
@@ -1274,8 +3098,9 @@ data:
         rm $WORKDIR/pods.txt
         echo "" > "$PODREC_TMP_F"
         exit_on_trap 11
-        getVaultPods
+        getVaultPods > $WORKDIR/pods.txt
         exit_on_trap 12
+
         while read host dnsname; do
             if [ -z "$dnsname" ]; then
                 # probably a recovering pod waiting for an IP address
@@ -1283,7 +3108,8 @@ data:
                 continue
             fi
 
-            NO_HEADER=true API_TMOUT=$QUERY_TMOUT \
+            NO_HEADER=true \
+            API_TMOUT=$QUERY_TMOUT \
             vaultAPI server_status GET $dnsname.$POD_TARGET_BASE \
                 /sys/health
             echo -n "$server_status" > $WORKDIR/healthcheck.txt
@@ -1297,6 +3123,8 @@ data:
             exit_on_trap 14
         done <$WORKDIR/pods.txt
         mv "$PODREC_TMP_F" "$PODREC_F"
+
+        vaultRekey
     done
 kind: ConfigMap
 metadata:

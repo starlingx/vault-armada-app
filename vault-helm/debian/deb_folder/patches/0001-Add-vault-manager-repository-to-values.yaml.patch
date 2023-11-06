@@ -1,21 +1,30 @@
-From 6d315af79248c13384cf5ae592eea29a8f9287f4 Mon Sep 17 00:00:00 2001
+From c271b6865e6c1bcbca6372f8b3b2db6d19ec9e89 Mon Sep 17 00:00:00 2001
 From: Greg Waines <greg.waines@windriver.com>
 Date: Sat, 5 Nov 2022 20:14:58 -0400
 Subject: [PATCH] Add vault manager repository to values.yaml
 
-Add timing parameters for vault manager to helm values.  These
-parameters tune the timing of unsealing the vault server/raft.
+Add image repository for vault-manager pod
+
+Add timing parameters for the vault-manager main function, rate at which
+to check for and unseal vault pods.
+
+Add timing parameters for the vault API.  These parameters tune the
+timing of unsealing the vault server/raft, queries and operations for
+vault rekey.
+
+Add option to enable/disable rekey of vault after conversion of storage
+backend from PVC to k8s secrets.
 
 Signed-off-by: Michel Thebeau <michel.thebeau@windriver.com>
 ---
- values.yaml | 37 +++++++++++++++++++++++++++++++++++++
- 1 file changed, 37 insertions(+)
+ values.yaml | 68 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 68 insertions(+)
 
 diff --git a/values.yaml b/values.yaml
-index 9e35ac8..779beea 100644
+index 9e35ac8..0da34a5 100644
 --- a/values.yaml
 +++ b/values.yaml
-@@ -40,6 +40,43 @@ global:
+@@ -40,6 +40,74 @@ global:
      # See the top level serverTelemetry section below before enabling this feature.
      prometheusOperator: false
  
@@ -43,22 +52,53 @@ index 9e35ac8..779beea 100644
 +  #
 +  unsealWaitIntervals: 3
 +
-+  # Network timeout for queries to vault server /sys/health endpoint
-+  #
-+  # The maximum time in seconds to wait for a server to respond to
-+  # health query.  This applies for the HA recovery situations, not the
-+  # initialization of vault cluster.  Unsetting the value is not
-+  # recommended, and defaults to curl --connect-timeout of 60 seconds.
-+  #
-+  # vault-manager will appear to hang if healthQueryTimeout is
-+  # over-large.  This setting affects the logs, since vault-manager will
-+  # issue a log when the 'sealed' status toggles between true/false and
-+  # the 'unknown' value
-+  healthQueryTimeout: 2
++  api:
++    # Network timeout for queries to vault server /sys/health endpoint
++    #
++    # The maximum time in seconds to wait for a server to respond to
++    # health query.  This applies for the HA recovery situations, not the
++    # initialization of vault cluster.  Unsetting the value is not
++    # recommended, and defaults to timeout of 120 seconds.
++    #
++    # vault-manager will appear to hang if healthQueryTimeout is
++    # over-large.  This setting affects the logs, since vault-manager will
++    # issue a log when the 'sealed' status toggles between true/false and
++    # the 'unknown' value
++    healthQueryTimeout: 2
++
++    # Network timeout for vault API operations against /sys/unseal
++    #
++    # The maximum time in seconds to wait for a server to respond to
++    # the unseal request.
++    unsealOpTimeout: 10
++
++    # Network timeout for queries to vault server /sys/rekey/init
++    # and /sys/rekey/verify
++    #
++    # The maximum time in seconds to wait for a server to respond to
++    # the query.
++    rekeyStatusTimeout: 2
++
++    # Network timeout for vault API operations against /sys/rekey/init
++    # and /sys/rekey/verify
++    #
++    # The maximum time in seconds to wait for a server to respond to
++    # the request.
++    rekeyOpTimeout: 10
++
++  rekey:
++    # During upgrade of the application from PVC storage to storage
++    # using kubernetes, enable vault rekey to run automatically to
++    # resecure the vault with new shards.
++    # See also Hashicorp vault documentation:
++    #   https://developer.hashicorp.com/vault/tutorials/operations/rekeying-and-rotating
++    #   https://developer.hashicorp.com/vault/api-docs/v1.13.x/system/rekey
++    #
++    enableOnPVCConversion: true
 +
  injector:
    # True if you want to enable vault agent injection.
    # @default: global.enabled
 -- 
-2.25.1
+2.34.1
 

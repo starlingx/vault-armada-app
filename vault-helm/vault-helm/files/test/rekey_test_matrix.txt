@@ -1,0 +1,711 @@
+
+###
+# read and do not run this script
+#
+exit 0
+
+###
+# Normal rekey operation success tests
+#
+# Runs inside of vault-manager pod
+
+kubectl exec -n vault sva-vault-manager2-0 -it -- bash
+source /opt/script/init.sh
+
+
+function assertNoTestClutter {
+    secretsExistAny cluster-rekey-request \
+        cluster-rekey-shuffle \
+        cluster-rekey-audit \
+        cluster-rekey-verified \
+        cluster-rekey-0 \
+        cluster-rekey-4 \
+        cluster-key-bk-0 \
+        cluster-key-bk-1
+    if [ $? -eq 0 ]; then
+        log $ERROR "Clean up test clutter"
+        return 1
+    fi
+    return 0
+}
+
+NONCE_BASE="e18b5b44-eb88-e860-4d9f-ed00000000"
+restartseq=2000
+seqend=2059
+# Loop without errors; Assert the procedure does not normally
+# show errors
+for i in $( seq $restartseq $seqend ); do
+    assertNoTestClutter || break
+
+    log $INFO "starting iteration $i"
+    nonce="${NONCE_BASE}$i"
+    set_secret cluster-rekey-request /dev/stdin <<<$nonce
+
+    while true; do
+        sleep 1
+        secretsExistAny cluster-rekey-request
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+    # review the results
+    error=0
+    kubectl get secrets -n vault | grep rekey
+    if [ $? -eq 0 ]; then
+         log $ERROR "The test is not completed clean"
+         error=1
+    fi
+
+    kubectl logs -n vault sva-vault-manager2-0 \
+    | grep -v "WARNING rekeyPreCheckStability not implemented" \
+    | grep " ERROR \| WARNING "
+    if [ $? -eq 0 ]; then
+        log $ERROR "Test vault-manager pod has error/warnings"
+        error=1
+    fi
+    if [ "$error" -ne 0 ]; then
+        break
+    fi
+    sleep 30
+done
+
+# finally, remember to copy the manager pod log
+kubectl logs -n vault sva-vault-manager2-0 > "log_nofailure_${restartseq}-${seqend}.txt"
+
+
+# Loop with inject failure of standby vault server. Sleep for
+# majorsleeptime plus random bit < 1 sec before killing a server
+#
+# Set majorsleeptime to target a portion of the running rekey procedure:
+# Approximately:
+# 1. 0-5 sec: Random STATUS_RATE time for vault-manager to check pod
+#             status and start rekey
+# 2. +1 sec: rekey initialized
+# 3. +5 sec: start rekey authentication
+# 4. +3 sec: end rekey authentication; new shards stored
+# 5. +10 sec: begin verification
+# 6. +3 sec: complete verification
+# 7. +9 sec: shuffle cluster keys
+# 8. +7 sec: complete shuffle
+# 9. +5 sec: Audit new shards secrets; delete old shards
+# 10.+6 sec: rekey complete
+
+# Overall about 60 sec
+#
+# Runs inside of vault-manager pod
+# assertNoTestClutter function from example above
+
+kubectl exec -n vault sva-vault-manager2-0 -it -- bash
+source /opt/script/init.sh
+
+
+NONCE_BASE="e18b5b44-eb88-e860-4d9f-ed00000000"
+majorsleeptime=0
+restartseq=2060
+seqend=2119
+for i in $( seq $restartseq $seqend ); do
+    assertNoTestClutter || break
+
+    # sleep a certain amount of time before killing a vault pod
+    majorsleeptime=$((majorsleeptime + 1))
+    sleeptime="${majorsleeptime}.$(( $RANDOM % 100 ))"
+    server="$( getVaultPods --ha | grep "false$" \
+        | sort -R | head -n 1 | awk '{print $1}' )"
+
+    log $INFO "starting iteration $i; sleep $sleeptime before killing standby $server"
+    nonce="${NONCE_BASE}$i"
+    set_secret cluster-rekey-request /dev/stdin <<<$nonce
+
+    sleep $sleeptime
+    kubectl delete pods -n vault $server
+
+    while true; do
+        sleep 1
+        secretsExistAny cluster-rekey-request
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+
+    sleep 30
+done
+
+# finally, remember to copy the manager pod log
+kubectl logs -n vault sva-vault-manager2-0 > "log_standby_${restartseq}-${seqend}.txt"
+
+
+###
+# as above but deleting active server
+#
+NONCE_BASE="e18b5b44-eb88-e860-4d9f-ed00000000"
+majorsleeptime=0
+restartseq=2120
+seqend=2179
+for i in $( seq $restartseq $seqend ); do
+    assertNoTestClutter || break
+
+    # sleep a certain amount of time before killing a vault pod
+    majorsleeptime=$((majorsleeptime + 1))
+    sleeptime="${majorsleeptime}.$(( $RANDOM % 100 ))"
+    server=$( getVaultPods --ha | grep true | awk '{print $1}' )
+    nonce="${NONCE_BASE}$i"
+
+    log $INFO "starting iteration $i; sleep $sleeptime before killing $server"
+    set_secret cluster-rekey-request /dev/stdin <<<$nonce
+
+    sleep $sleeptime
+    kubectl delete pods -n vault $server
+
+    while true; do
+        sleep 1
+        secretsExistAny cluster-rekey-request > /dev/null
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+
+    sleep 30
+done
+
+# finally, remember to copy the manager pod log
+kubectl logs -n vault sva-vault-manager2-0 > "log_active_${restartseq}-${seqend}.txt"
+
+
+###
+# as above but deleting vault-manager
+#
+# runs on controller node instead of in vault-manager pod
+
+function secretsExistAny {
+    local grpstr
+    grpstr="$( echo $@ | sed "s; ;\\|;g" )"
+    kubectl get secrets -n vault \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+    | grep "^\($grpstr\)$"
+}
+
+function assertNoTestClutter {
+    secretsExistAny cluster-rekey-request \
+        cluster-rekey-shuffle \
+        cluster-rekey-audit \
+        cluster-rekey-verified \
+        cluster-rekey-0 \
+        cluster-rekey-4 \
+        cluster-key-bk-0 \
+        cluster-key-bk-1
+    if [ $? -eq 0 ]; then
+        log $ERROR "Clean up test clutter"
+        return 1
+    fi
+    return 0
+}
+
+function log {
+    echo $@
+}
+
+    function set_secret {
+        local secret="$1"
+        local contentf="$2"
+        local output
+        local result
+
+        output="$( kubectl create secret generic -n "vault" \
+            "$secret" "--from-file=strdata=$contentf" 2>&1 )"
+        result=$?
+        if [ "$result" -ne 0 ]; then
+            log $ERROR "Failed to create secret $secret"
+            log $DEBUG "Output: [$output]"
+        fi
+        return $result
+    }
+
+
+NONCE_BASE="e18b5b44-eb88-e860-4d9f-ed00000000"
+majorsleeptime=0
+restartseq=2180
+seqend=2239
+for i in $( seq $restartseq $seqend ); do
+    assertNoTestClutter || break
+
+    # sleep a certain amount of time before killing a vault pod
+    majorsleeptime=$((majorsleeptime + 1))
+    sleeptime="${majorsleeptime}.$(( $RANDOM % 100 ))"
+    server=sva-vault-manager2-0
+    nonce="${NONCE_BASE}$i"
+
+    log $INFO "starting iteration $i; sleep $sleeptime before killing $server"
+    echo "starting iteration $i; sleep $sleeptime before killing $server" \
+      >"log_vault-manager_${i}_${sleeptime}.txt"
+    set_secret cluster-rekey-request /dev/stdin <<<$nonce
+
+    sleep $sleeptime
+    kubectl logs -f -n vault sva-vault-manager2-0 \
+        >> "log_vault-manager_${i}_${sleeptime}.txt" &
+    kubectl delete pods -n vault $server
+
+    while true; do
+        sleep 1
+        secretsExistAny cluster-rekey-request > /dev/null
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+
+    kubectl logs -n vault sva-vault-manager2-0 >> "log_vault-manager_${i}_${sleeptime}.txt"
+
+    sleep 30
+done
+
+###
+# As above but deleting random server and the vault manager
+#
+
+NONCE_BASE="e18b5b44-eb88-e860-4d9f-ed00000000"
+majorsleeptime=0
+restartseq=2240
+seqend=2299
+for i in $( seq $restartseq $seqend ); do
+    assertNoTestClutter || break
+
+    # sleep a certain amount of time before killing a vault pod
+    majorsleeptime=$((majorsleeptime + 1))
+    sleeptime="${majorsleeptime}.$(( $RANDOM % 100 ))"
+    server="sva-vault-manager2-0 \
+        $( kubectl get pods -n vault \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+        | grep "sva-vault-[0-2]" | sort -R | head -n 1 )"
+
+    nonce="${NONCE_BASE}$i"
+
+    log $INFO "starting iteration $i; sleep $sleeptime before killing $server"
+    echo "starting iteration $i; sleep $sleeptime before killing $server" \
+      >"log_vault-manager_plus_random_${i}_${sleeptime}.txt"
+    set_secret cluster-rekey-request /dev/stdin <<<$nonce
+
+    sleep $sleeptime
+    kubectl logs -f -n vault sva-vault-manager2-0 \
+        >> "log_vault-manager_plus_random_${i}_${sleeptime}.txt" &
+    kubectl delete pods -n vault $server
+
+    while true; do
+        sleep 1
+        secretsExistAny cluster-rekey-request > /dev/null
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+
+    kubectl logs -n vault sva-vault-manager2-0 >> "log_vault-manager_plus_random_${i}_${sleeptime}.txt"
+
+    sleep 30
+done
+
+
+###
+# As above but deleting active server and the vault manager
+#
+
+
+NONCE_BASE="e18b5b44-eb88-e860-4d9f-ed00000000"
+majorsleeptime=0
+restartseq=2300
+seqend=2359
+for i in $( seq $restartseq $seqend ); do
+    assertNoTestClutter || break
+
+    # sleep a certain amount of time before killing a vault pod
+    majorsleeptime=$((majorsleeptime + 1))
+    sleeptime="${majorsleeptime}.$(( $RANDOM % 100 ))"
+    active="$(
+        kubectl get pods -n vault \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.vault-active}{"\n"}{end}' \
+        | grep "^sva-vault.*true" | gawk '{print $1}' )"
+    server="sva-vault-manager2-0 $active"
+
+    nonce="${NONCE_BASE}$i"
+
+    log $INFO "starting iteration $i; sleep $sleeptime before killing $server"
+    echo "starting iteration $i; sleep $sleeptime before killing $server" \
+      >"log_vault-manager_active_${i}_${sleeptime}.txt"
+          set_secret cluster-rekey-request /dev/stdin <<<$nonce
+
+    sleep $sleeptime
+    kubectl logs -f -n vault sva-vault-manager2-0 \
+        > "log_vault-manager_active_${i}_${sleeptime}.txt" &
+    kubectl delete pods -n vault $server
+
+    while true; do
+        sleep 1
+        secretsExistAny cluster-rekey-request > /dev/null
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+
+    kubectl logs -n vault sva-vault-manager2-0 >> "log_vault-manager_active_${i}_${sleeptime}.txt"
+
+    sleep 30
+done
+
+
+###
+# As above but deleting standby server and the vault manager
+#
+
+NONCE_BASE="e18b5b44-eb88-e860-4d9f-ed00000000"
+majorsleeptime=0
+restartseq=2360
+seqend=2419
+for i in $( seq $restartseq $seqend ); do
+    assertNoTestClutter || break
+
+    # sleep a certain amount of time before killing a vault pod
+    majorsleeptime=$((majorsleeptime + 1))
+    sleeptime="${majorsleeptime}.$(( $RANDOM % 100 ))"
+    standby="$(
+        kubectl get pods -n vault \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.vault-active}{"\n"}{end}' \
+        | grep "^sva-vault.*false" | gawk '{print $1}' | sort -R | head -n 1 )"
+    server="sva-vault-manager2-0 $standby"
+
+    nonce="${NONCE_BASE}$i"
+
+    log $INFO "starting iteration $i; sleep $sleeptime before killing $server"
+    echo "starting iteration $i; sleep $sleeptime before killing $server" \
+      >"log_vault-manager_standby_${i}_${sleeptime}.txt"
+    set_secret cluster-rekey-request /dev/stdin <<<$nonce
+
+    sleep $sleeptime
+    kubectl logs -f -n vault sva-vault-manager2-0 \
+        >> "log_vault-manager_standby_${i}_${sleeptime}.txt" &
+    kubectl delete pods -n vault $server
+
+    while true; do
+        sleep 1
+        secretsExistAny cluster-rekey-request > /dev/null
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+
+    kubectl logs -n vault sva-vault-manager2-0 >> "log_vault-manager_standby_${i}_${sleeptime}.txt"
+
+    sleep 30
+done
+
+###
+# pick processes to kill and kill them on the nodes where they are running
+#
+
+# setup ssh keys between controller and other cluster nodes
+# etc, so no password require for scp
+
+# run as root on each node, including on controller
+function kill_vault_manager {
+    local ref="$1"
+    local procn
+    # take only the first; if there's a second one it's a subprocess
+    # of the first
+    procn="$( ps -ef \
+        | grep "/opt/sc[r]ipt/init.sh" \
+        | awk '{print $2}' \
+        | head -n 1 )"
+    if [[ "$procn" =~ ^[0-9]{3,} ]]; then
+        ps -p "$procn" | grep "[0-9] bash$" -q
+        if [ $? -eq 0 ]; then
+            kill -9 "$procn"
+            return
+        fi
+    fi
+    if [ -n "$procn" ]; then
+        echo "Failed to kill vault-manager [$procn]: $ref" >&2
+    fi
+}
+
+function kill_vault {
+    local ref="$1"
+    local procn
+    procn="$( ps -ef \
+        | grep "vault[ ]server" \
+        | grep -v "docker-entrypoint.sh" \
+        | awk '{print $2}' )"
+    if [[ "$procn" =~ ^[0-9]{3,} ]]; then
+        ps -p "$procn" | grep "[0-9] vault$" -q
+        if [ $? -eq 0 ]; then
+            kill -9 "$procn"
+            return
+        fi
+    fi
+    echo "Failed to kill vault [$procn]: $ref" >&2
+}
+
+function vault_process_killer {
+    local tokill
+    local ref
+
+    while true; do
+        ref=""
+        if ! [ -f "/tmp/vault_deleteme" ]; then
+            sleep .1
+            continue
+        fi
+        for tokill in $( cat /tmp/vault_deleteme ); do
+            if [ -z "$ref" ]; then
+                ref="$tokill"
+                continue
+            fi
+            if [ "$tokill" == "vault" ]; then
+                kill_vault $ref
+            elif [ "$tokill" == "manager" ]; then
+                kill_vault_manager $ref
+            else
+                echo "Process [$tokill] not valid: $ref" >&2
+            fi
+        done
+        rm /tmp/vault_deleteme
+    done
+}
+
+
+###
+# As above, pick random selection of processes to kill
+#
+
+servers="manager
+controller-0
+controller-1
+worker-0"
+
+NONCE_BASE="e18b5b44-eb88-e860-4d9f-ed00000000"
+majorsleeptime=0
+restartseq=2420
+seqend=2479
+for i in $( seq $restartseq $seqend ); do
+    assertNoTestClutter || break
+
+    nonce="${NONCE_BASE}$i"
+    # sleep a certain amount of time before killing a vault pod
+    majorsleeptime=$((majorsleeptime + 1))
+    sleeptime="${majorsleeptime}.$(( $RANDOM % 100 ))"
+    howmany="$((RANDOM % 4 + 1))"
+
+    tokill="$( echo "$servers" | sort -R | head -n "$howmany" )"
+
+    echo "tokill: ["$tokill"]"
+    rm instruct_*.txt
+    echo -n "$nonce" > instruct_controller-0.txt
+    echo -n "$nonce" > instruct_controller-1.txt
+    echo -n "$nonce" > instruct_worker-0.txt
+    for server in $tokill; do
+        if [ "$server" == "manager" ]; then
+            echo -n " manager" >> instruct_controller-0.txt
+            echo -n " manager" >> instruct_controller-1.txt
+            echo -n " manager" >> instruct_worker-0.txt
+            continue
+        fi
+        echo -n " vault" >> "instruct_${server}.txt"
+    done
+
+    log $INFO "starting iteration $i; sleep $sleeptime before killing "$tokill
+    echo "starting iteration $i; sleep $sleeptime before killing "$tokill > "log_any_server_${i}_${sleeptime}.txt"
+    set_secret cluster-rekey-request /dev/stdin <<<$nonce
+
+    sleep $sleeptime
+    kubectl logs -f -n vault sva-vault-manager2-0 \
+        >> "log_any_server_${i}_${sleeptime}.txt" &
+    logpid="$!"
+
+    # delete pods here
+    if ! grep -q "$nonce$" instruct_controller-0.txt; then
+        scp instruct_controller-0.txt controller-0:/tmp/vault_deleteme
+    fi
+    if ! grep -q "$nonce$" instruct_controller-1.txt; then
+        scp instruct_controller-1.txt controller-1:/tmp/vault_deleteme
+    fi
+    if ! grep -q "$nonce$" instruct_worker-0.txt; then
+        scp instruct_worker-0.txt worker-0:/tmp/vault_deleteme
+    fi
+
+    while true; do
+        sleep 1
+        secretsExistAny cluster-rekey-request > /dev/null
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+
+    echo $tokill | grep manager -q
+    if [ $? -eq 0 ]; then
+        kubectl logs -n vault sva-vault-manager2-0 >> "log_any_server_${i}_${sleeptime}.txt"
+    else
+        kill $logpid
+    fi
+
+    sleep 15
+    # and just in case we failed to kill the backgrounded log watcher
+    pkill -u sysadmin kubectl
+    # kill all pods to remove stink of crashloopbackup
+    kubectl delete pods -n vault sva-vault-0 sva-vault-1 sva-vault-2 sva-vault-manager2-0
+    sleep 75
+done
+
+
+
+###
+# As above, kill the vault-manager
+#
+
+NONCE_BASE="e18b5b44-eb88-e860-4d9f-ed00000000"
+majorsleeptime=0
+restartseq=2480
+seqend=2539
+for i in $( seq $restartseq $seqend ); do
+    assertNoTestClutter || break
+
+    nonce="${NONCE_BASE}$i"
+    # sleep a certain amount of time before killing a vault pod
+    majorsleeptime=$((majorsleeptime + 1))
+    sleeptime="${majorsleeptime}.$(( $RANDOM % 100 ))"
+
+    tokill="manager"
+
+    echo "tokill: ["$tokill"]"
+    rm instruct_*.txt
+    echo -n "$nonce" > instruct_controller-0.txt
+    echo -n "$nonce" > instruct_controller-1.txt
+    echo -n "$nonce" > instruct_worker-0.txt
+    for server in $tokill; do
+        if [ "$server" == "manager" ]; then
+            echo -n " manager" >> instruct_controller-0.txt
+            echo -n " manager" >> instruct_controller-1.txt
+            echo -n " manager" >> instruct_worker-0.txt
+            continue
+        fi
+        echo -n " vault" >> "instruct_${server}.txt"
+    done
+
+    log $INFO "starting iteration $i; sleep $sleeptime before killing "$tokill
+    echo "starting iteration $i; sleep $sleeptime before killing "$tokill > "log_vault-manager_${i}_${sleeptime}.txt"
+    set_secret cluster-rekey-request /dev/stdin <<<$nonce
+
+    sleep $sleeptime
+    kubectl logs -f -n vault sva-vault-manager2-0 \
+        >> "log_vault-manager_${i}_${sleeptime}.txt" &
+    logpid="$!"
+
+    # delete pods here
+    if ! grep -q "$nonce$" instruct_controller-0.txt; then
+        scp instruct_controller-0.txt controller-0:/tmp/vault_deleteme
+    fi
+    if ! grep -q "$nonce$" instruct_controller-1.txt; then
+        scp instruct_controller-1.txt controller-1:/tmp/vault_deleteme
+    fi
+    if ! grep -q "$nonce$" instruct_worker-0.txt; then
+        scp instruct_worker-0.txt worker-0:/tmp/vault_deleteme
+    fi
+
+    while true; do
+        sleep 1
+        secretsExistAny cluster-rekey-request > /dev/null
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+
+    echo $tokill | grep manager -q
+    if [ $? -eq 0 ]; then
+        kubectl logs -n vault sva-vault-manager2-0 >> "log_vault-manager_${i}_${sleeptime}.txt"
+    else
+        kill $logpid
+    fi
+
+    sleep 15
+    # and just in case we failed to kill the backgrounded log watcher
+    pkill -u sysadmin kubectl
+    # kill all pods to remove stink of crashloopbackup
+    kubectl delete pods -n vault sva-vault-manager2-0
+    sleep 30
+done
+
+
+###
+# As above, kill the active server
+#
+
+NONCE_BASE="e18b5b44-eb88-e860-4d9f-ed00000000"
+majorsleeptime=0
+restartseq=2480
+seqend=2539
+for i in $( seq $restartseq $seqend ); do
+    assertNoTestClutter || break
+
+    nonce="${NONCE_BASE}$i"
+    # sleep a certain amount of time before killing a vault pod
+    majorsleeptime=$((majorsleeptime + 1))
+    sleeptime="${majorsleeptime}.$(( $RANDOM % 100 ))"
+
+    nodename="$( kubectl get pods -n vault \
+        -o jsonpath='{range .items[*]}{.spec.nodeName}{"\t"}{.metadata.name}{"\t"}{.metadata.labels.vault-active}{"\n"}{end}' \
+        | grep "true$" | gawk '{print $1}' )"
+
+    tokill="manager $nodename"
+
+    echo "tokill: ["$tokill"]"
+    rm instruct_*.txt
+    echo -n "$nonce" > instruct_controller-0.txt
+    echo -n "$nonce" > instruct_controller-1.txt
+    echo -n "$nonce" > instruct_worker-0.txt
+    for server in $tokill; do
+        if [ "$server" == "manager" ]; then
+            echo -n " manager" >> instruct_controller-0.txt
+            echo -n " manager" >> instruct_controller-1.txt
+            echo -n " manager" >> instruct_worker-0.txt
+            continue
+        fi
+        echo -n " vault" >> "instruct_${server}.txt"
+    done
+
+    log $INFO "starting iteration $i; sleep $sleeptime before killing "$tokill
+    echo "starting iteration $i; sleep $sleeptime before killing "$tokill > "log_any_server_${i}_${sleeptime}.txt"
+    set_secret cluster-rekey-request /dev/stdin <<<$nonce
+
+    sleep $sleeptime
+    kubectl logs -f -n vault sva-vault-manager2-0 \
+        >> "log_any_server_${i}_${sleeptime}.txt" &
+    logpid="$!"
+
+    # delete pods here
+    if ! grep -q "$nonce$" instruct_controller-0.txt; then
+        scp instruct_controller-0.txt controller-0:/tmp/vault_deleteme
+    fi
+    if ! grep -q "$nonce$" instruct_controller-1.txt; then
+        scp instruct_controller-1.txt controller-1:/tmp/vault_deleteme
+    fi
+    if ! grep -q "$nonce$" instruct_worker-0.txt; then
+        scp instruct_worker-0.txt worker-0:/tmp/vault_deleteme
+    fi
+
+    while true; do
+        sleep 1
+        secretsExistAny cluster-rekey-request > /dev/null
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+
+    echo $tokill | grep manager -q
+    if [ $? -eq 0 ]; then
+        kubectl logs -n vault sva-vault-manager2-0 >> "log_any_server_${i}_${sleeptime}.txt"
+    else
+        kill $logpid
+    fi
+
+    sleep 15
+    # and just in case we failed to kill the backgrounded log watcher
+    pkill -u sysadmin kubectl
+    # kill all pods to remove stink of crashloopbackup
+    kubectl delete pods -n vault sva-vault-0 sva-vault-1 sva-vault-2 sva-vault-manager2-0
+    sleep 75
+done
+
