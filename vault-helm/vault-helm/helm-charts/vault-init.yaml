@@ -36,6 +36,17 @@ data:
     # reserve trap '0' for disabling a debugging trap request
     DEBUGGING_TRAP=0
 
+    # set the default manager mode; modes include
+    #   VAULT_MANAGER (default)
+    #   MOUNT_HELPER
+    #   INTERACTIVE (i.e., when this script is sourced by an author)
+    if [ -z "$MANAGER_MODE" ]; then
+        MANAGER_MODE="VAULT_MANAGER"
+    fi
+    if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+        MANAGER_MODE="INTERACTIVE"
+    fi
+
     # Maximum sleep seconds for mount-helper before exiting
     MOUNT_HELPER_MAX_TIME=60
 
@@ -131,7 +142,8 @@ data:
         local newLogLevel
 
         # check if log override file "Exists"
-        if [ -f $LOG_OVERRIDE_FILE ]; then
+        if [ -f $LOG_OVERRIDE_FILE ] \
+            && [ "$MANAGER_MODE" != "INTERACTIVE" ]; then
             newLogLevel=$(cat $LOG_OVERRIDE_FILE)
             # validation for newLogLevel
             if [[ "$newLogLevel" =~ ^[1-5]$ ]]; then
@@ -173,6 +185,11 @@ data:
         local trap="$1"
         local tfnum=""
 
+        if [ "$MANAGER_MODE" == "INTERACTIVE" ]; then
+            # do not interfere with exit_on_trap intended for
+            # vault-manager pod
+            return
+        fi
         if [ -e "$TRAPFILE" ]; then
             tfnum=$(cat $TRAPFILE)
             log $DEBUG "exit_on_trap: removing $TRAPFILE"
@@ -1053,6 +1070,11 @@ data:
     #
     # LOGIC
     #
+    if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+        # This script was sourced
+        return 0
+    fi
+
     exit_on_trap 1
 
     # check if this pod is helping to convert storage from pvc to k8s
