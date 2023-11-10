@@ -36,6 +36,14 @@ data:
     # reserve trap '0' for disabling a debugging trap request
     DEBUGGING_TRAP=0
 
+    # Pause notification file. A debugging option to permit
+    # vault-manager to be paused at any of the exit_on_trap code points.
+    # Use case may include permitting time for a developer to setup
+    # conditions for debug and test.
+    PAUSEFILE=$WORKDIR/pause_on_trap
+    PAUSE_RATE=1  # rate at which to test for unpause
+    EARLY_PAUSE={{ .Values.manager.pause }}
+
     # set the default manager mode; modes include
     #   VAULT_MANAGER (default)
     #   MOUNT_HELPER
@@ -181,6 +189,40 @@ data:
         QUERY_TMOUT=""
     fi
 
+    function pause_on_trap {
+        local thistrap="$1"
+        local pausenum
+
+        if [ ! -e "$PAUSEFILE" ]; then
+            # no pause request
+            return
+        fi
+
+        pausenum="$( cat "$PAUSEFILE" )"
+        if [ -n "$pausenum" ] \
+            && [ "$pausenum" != "$thistrap" ]; then
+            # not on this trap
+            return
+        fi
+
+        log $INFO "Vault manager is paused ($thistrap)"
+        # Until pause file is removed by the author,
+        # or until the content of pause_on_trap file is
+        # not-empty and not matching the current trap.
+        #
+        # If the pause_on_trap file containing specific trap number is
+        # replaced with empty file: the pause state is maintained.
+        while [ -e "$PAUSEFILE" ]; do
+            pausenum="$( cat "$PAUSEFILE" )"
+            if [ -n "$pausenum" ] \
+                && [ "$thistrap" != "$pausenum" ]; then
+                break;
+            fi
+            sleep "$PAUSE_RATE"
+        done
+        log $INFO "Vault manager is unpaused"
+    }
+
     function exit_on_trap {
         local trap="$1"
         local tfnum=""
@@ -190,6 +232,10 @@ data:
             # vault-manager pod
             return
         fi
+
+        # Debug option pause_on_trap
+        pause_on_trap "$trap"
+
         if [ -e "$TRAPFILE" ]; then
             tfnum=$(cat $TRAPFILE)
             log $DEBUG "exit_on_trap: removing $TRAPFILE"
@@ -1073,6 +1119,10 @@ data:
     if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
         # This script was sourced
         return 0
+    fi
+
+    if [ -n "$EARLY_PAUSE" ]; then
+        echo -n "$EARLY_PAUSE" > $PAUSEFILE
     fi
 
     exit_on_trap 1

@@ -1,0 +1,31 @@
+From 5397fda3742cdd68f68fddfed5d5ff954bc3114a Mon Sep 17 00:00:00 2001
+From: Michel Thebeau <Michel.Thebeau@windriver.com>
+Date: Mon, 6 Nov 2023 19:28:52 +0000
+Subject: [PATCH] Add manager pause request to helm values.yaml
+
+Signed-off-by: Michel Thebeau <Michel.Thebeau@windriver.com>
+---
+ values.yaml | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/values.yaml b/values.yaml
+index 41548fc..1d68394 100644
+--- a/values.yaml
++++ b/values.yaml
+@@ -86,6 +86,13 @@ manager:
+   log:
+     defaultLogLevel: 2
+ 
++  # Debugging option to setup pause request for vault manager on startup
++  # A pause_on_trap file will be created with the content of this value
++  # Values may include a positive integer matching a call of
++  # exit_on_trap
++  #
++  # pause: 1
++
+ injector:
+   # True if you want to enable vault agent injection.
+   # @default: global.enabled
+-- 
+2.34.1
+
