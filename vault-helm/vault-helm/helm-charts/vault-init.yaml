@@ -574,24 +574,61 @@ data:
         local server="$1"
         local index
         local b64key
-        local key_pair
-        local key_response
-        local key_error
+        local data
+        local response
+        local value
+        local autherror
+
+        # always abort an unseal in progress
+        data='{"reset": true}'
+        NO_HEADER=true \
+        vaultAPI response POST $server.$POD_TARGET_BASE \
+            /sys/unseal "$data"
+        if [ $? -ne 0 ]; then
+            # error is already printed
+            # Including if vault is already unsealed.
+            if [[ "$response" == *"vault is unsealed"* ]]; then
+                log $WARNING "unsealVault: server $server is" \
+                    "already unsealed"
+            fi
+            return 1
+        fi
+
         for index in $(seq 0 $((KEY_SECRET_SHARES - 1 ))); do
-            b64key=$( get_secret "cluster-key-$index" | jq -r '.keys_base64[]' )
-            key_pair="{\"key\": \"$b64key\"}"
+            b64key=$( get_secret "cluster-key-$index" \
+                | jq -r '.keys_base64[]' )
+            data="{\"key\": \"$b64key\"}"
 
             NO_HEADER=true \
-            vaultAPI key_response POST $server.$POD_TARGET_BASE \
-                /sys/unseal "$key_pair"
-
-            key_error=$(echo -n "$key_response"| jq -r '.errors[]?')
-            if [ -n "$key_error" ]; then
-                log $ERROR "Vault unseal request failed: $key_error"
+            vaultAPI response POST $server.$POD_TARGET_BASE \
+                /sys/unseal "$data"
+            if [ $? -ne 0 ]; then
+                # error is already printed, including errors from the
+                # vault REST API; but for debugging purposes, highlight
+                # the authentication error
+                autherror="cipher: message authentication failed"
+                if [[ "$response" == *"$autherror"* ]]; then
+                    log $ERROR "Failed to authenticate /sys/unseal" \
+                        "with cluster-key"
+                    # perhaps use this info in the future
+                    return 2
+                fi
+                return 1
             fi
+
+            # when the unseal completes with KEY_REQUIRED_THRESHOLD then
+            # the response will indicate sealed=false
+            value="$( echo "$response" | jq -r ".sealed" )"
+            if [ "$value" == "false" ]; then
+                return 0
+            fi
+
             # Some sleep is required to allow Raft convergence
             sleep "$UNSEAL_CONVERGE_TIME"
         done
+
+        log $ERROR "unsealVault completes without unseal or error"
+        return 1
     }
 
     # Takes the address of vault-0 as the cluster leader and
