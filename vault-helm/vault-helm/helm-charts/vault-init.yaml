@@ -721,9 +721,29 @@ data:
         local initialized
         local text
 
-        dnsname=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
-        NO_HEADER=true \
-        vaultAPI response GET $dnsname.$POD_TARGET_BASE /sys/health
+        # Wait for the pod to respond with a positive vault API response
+        # (i.e., not just a curl failure, and not a vault API failure)
+        while true; do
+            dnsname=$(awk 'NR==1{print $2}' $WORKDIR/pods.txt)
+            if [ -z "$dnsname" ]; then
+                log $INFO "waiting..."
+                sleep $STATUS_RATE
+                getVaultPods > $WORKDIR/pods.txt
+                continue
+            fi
+
+            log $INFO "Query server $dnsname for initialization status"
+            NO_HEADER=true \
+            API_TMOUT=2 \
+            vaultAPI response GET $dnsname.$POD_TARGET_BASE /sys/health
+            if [ $? -ne 0 ]; then
+                log $INFO "waiting..."
+                sleep $STATUS_RATE
+                getVaultPods > $WORKDIR/pods.txt
+                continue
+            fi
+            break
+        done
 
         echo -n "$response" > $WORKDIR/healthcheck.txt
         initialized=$( echo "$response" | jq -r .initialized )
