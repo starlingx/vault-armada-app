@@ -27,6 +27,10 @@ data:
     WORKDIR=/workdir
     mkdir -p $WORKDIR
 
+    # Selection of kubectl version from helm override
+    KUBECTL=kubectl
+    KUBECTL_HELM_OVERRIDE={{ .Values.manager.k8s.client_version }}
+
     # Trap and trap notification file. When SIGTERM is sent to this pod
     # we want to exit promptly and gracefully.
     TRAPFILE=$WORKDIR/exit_on_trap
@@ -143,6 +147,157 @@ data:
     LOG_OVERRIDE_FILE="$WORKDIR/log_level"
 
     # FUNCTIONS
+
+    # takes major/minor version of k8s and compares
+    # for example: v1.28 > v1.27 > v1.26
+    #
+    # Returns:
+    #    0 left is larger
+    #    1 equal
+    #    2 right is larger
+    function compareK8sVersion {
+        local left="$1"
+        local right="$2"
+
+        # strip leading 'v'
+        left="${left#v}"
+        right="${right#v}"
+
+        # compare the strings
+        if [ "$left" == "$right" ]; then
+            return 1
+        fi
+        # compare major
+        if [ "${left%.*}" -gt "${right%.*}" ]; then
+            return 0
+        elif [ "${left%.*}" -lt "${right%.*}" ]; then
+            return 2
+        fi
+
+        # compare the minor
+        if [ "${left#*.}" -gt "${right#*.}" ]; then
+            return 0
+        fi
+        return 2
+    }
+
+    # Give kubectl an opportunity to express complaints in the log
+    function k8sComplain {
+        local result
+
+        result="$( $KUBECTL version -o json 2>&1 >/dev/null )"
+        if [ -n "$result" ]; then
+            log $WARNING "kubectl: $result"
+        fi
+    }
+
+    # Double-check that the binary exists before setting the specified
+    # value of KUBECTL
+    function switchK8sVersion {
+        local select="$1"
+        local fname="kubectl.$select"
+        local newbin="${KUBECTL_INSTALL_PATH}/$fname"
+
+        which "$fname" >/dev/null
+        if [ $? -ne 0 -o ! -f "$newbin" ]; then
+            log $ERROR "Missing kubectl version: $select"
+            k8sComplain
+            return 1
+        fi
+
+        if [ "$KUBECTL" != "$fname" ]; then
+            KUBECTL="$fname"
+            log $INFO "Switching to use kubectl version $select"
+        fi
+
+        k8sComplain
+        return 0
+    }
+
+    # Select the version of kubectl matching the running server
+    function pickK8sVersion {
+        local result
+        local serverver
+        local majorver
+        local minorver
+        local select=""
+        local majmin=""
+        local maxver
+        local minver
+
+        # omit this code if the image does not support kubectl versions
+        if [ -z "$KUBE_VERSIONS" ]; then
+            k8sComplain
+            return
+        fi
+
+        if [ -n "$KUBECTL_HELM_OVERRIDE" ]; then
+            # pick the binary requested, if it exists
+            switchK8sVersion "$KUBECTL_HELM_OVERRIDE"
+            if [ $? -eq 0 ]; then
+                return
+            fi
+            log $ERROR "kubectl version from helm-override not" \
+                "available: $KUBECTL_HELM_OVERRIDE"
+        fi
+
+        # use -o json for consistent usage, as oppose to --short
+        result="$( $KUBECTL version -o json 2>/dev/null )"
+        if [ $? -ne 0 ]; then
+            log $ERROR "Unable to get k8s server version"
+            # no change in value of KUBECTL
+            k8sComplain
+            return
+        fi
+
+        serverver="$( jq -r '.serverVersion.gitVersion' <<<"$result" \
+            | grep "[0-9]" )"
+        majorver="$( jq -r '.serverVersion.major' <<<"$result" \
+            | grep "[0-9]" )"
+        minorver="$( jq -r '.serverVersion.minor' <<<"$result" \
+            | grep "[0-9]" )"
+        if [ -z "$serverver" -o -z "$majorver" -o -z "$minorver" ]; then
+            log $ERROR "Unable to detect K8s server version:" \
+                "["$result"]"
+            # no change in value of KUBECTL
+            k8sComplain
+            return
+        fi
+
+        # pick matching client major/minor version
+        for select in $KUBE_VERSIONS noverhere; do
+            majmin="v${majorver}.${minorver}"
+            if [[ "$select" =~ ^$majmin ]]; then
+                break
+            fi
+        done
+
+        if [ "$select" == noverhere ]; then
+            # Try to pick a near version.  We really shouldn't be in
+            # this situation, but here is a compromise.  This algorithm
+            # assumes that there are no omitted versions in the series
+            # of KUBE_VERSIONS, and that they are sorted largest to
+            # smallest in that list
+            maxver="$( awk '{print $1}' <<<"$KUBE_VERSIONS" )"
+            minver="$( awk '{print $NF}' <<<"$KUBE_VERSIONS" )"
+
+            compareK8sVersion ${serverver%.*} ${maxver%.*}
+            if [ "$?" -le 1 ]; then
+                select="$maxver"
+            else
+                compareK8sVersion ${minver%.*} ${serverver%.*}
+                if [ "$?" -le 1 ]; then
+                    select="$minver"
+                else
+                    log $ERROR "Could not pick nearest version for kubectl"
+                    k8sComplain
+                    return
+                fi
+            fi
+        fi
+
+        switchK8sVersion "${select%.*}"
+    }
 
     # Convert log level to text for log message
     function log_to_str {
@@ -451,7 +606,7 @@ data:
         fi
         jpath='{range .items[*]}'"$jfields"'{"\n"}{end}'
 
-        kubectl get pods \
+        $KUBECTL get pods \
         -n "$VAULT_NS" \
         -l component=server,app.kubernetes.io/name=vault \
         -o=jsonpath="$jpath" \
@@ -465,7 +620,7 @@ data:
         {.status.podIPs[].ip}{"\t"}{.status.phase}{"\n"} \
         {end}'
 
-        CURRENT_PODS=$(kubectl get pods \
+        CURRENT_PODS=$($KUBECTL get pods \
                     -l component=server,app.kubernetes.io/name=vault \
                     -o=jsonpath="$jsonPath" \
                     | grep Running \
@@ -482,7 +637,7 @@ data:
             log $INFO "Waiting for ${VAULT_FN}" \
                 "statefulset running pods ($CURRENT_PODS) to equal" \
                 "desired pods ($DESIRED_PODS)"
-            CURRENT_PODS=$(kubectl get pods \
+            CURRENT_PODS=$($KUBECTL get pods \
                 -l component=server,app.kubernetes.io/name=vault \
                 -o=jsonpath="$jsonPath" \
                 | grep Running \
@@ -904,7 +1059,7 @@ data:
         local output
         local result
 
-        output="$( kubectl create secret generic -n "$VAULT_NS" \
+        output="$( $KUBECTL create secret generic -n "$VAULT_NS" \
             "$secret" "--from-file=strdata=$contentf" 2>&1 )"
         result=$?
         if [ "$result" -ne 0 ]; then
@@ -917,7 +1072,7 @@ data:
     function get_secret {
         local secret="$1"
 
-        kubectl get secrets -n "$VAULT_NS" "$secret" \
+        $KUBECTL get secrets -n "$VAULT_NS" "$secret" \
             -o jsonpath='{.data.strdata}' \
         | base64 -d
     }
@@ -973,7 +1128,7 @@ data:
     # Prints the name of the secret
     function secretExists {
         local name="$1"
-        kubectl get secrets -n vault "$name" \
+        $KUBECTL get secrets -n vault "$name" \
             -o jsonpath='{.metadata.name}' 2>/dev/null \
         | grep "$name"
     }
@@ -1064,7 +1219,7 @@ data:
     function deleteSecrets {
         local secrets="$@"
         local text
-        text="$( kubectl delete secrets -n vault \
+        text="$( $KUBECTL delete secrets -n vault \
             $secrets 2>&1 )"
         if [ $? -ne 0 ]; then
             log $ERROR "Error deleting secrets: ["$text"]"
@@ -1090,7 +1245,7 @@ data:
         # the grep makes sure the result contains the 'manager-pvc'
         # string (as opposed to 'null' for example)
         text="$(
-            kubectl get persistentvolumeclaims -n vault -o json \
+            $KUBECTL get persistentvolumeclaims -n vault -o json \
             | jq -r "$jqscript" 2>/dev/null \
             | grep manager-pvc )"
         result=$?
@@ -1117,7 +1272,7 @@ data:
         # this kubectl query returns zero whether manager-pvc is
         # found or not
         # result variable is either empty or 'manager-pvc'
-        result="$( kubectl get pods -n vault \
+        result="$( $KUBECTL get pods -n vault \
             -o jsonpath="{${cspec}.${vspec}}" )"
 
         if [ -n "$result" ]; then
@@ -1132,7 +1287,7 @@ data:
         local result
 
         log $DEBUG "Waiting for delete of mount-helper job"
-        text="$( kubectl delete --ignore-not-found=true --wait=true \
+        text="$( $KUBECTL delete --ignore-not-found=true --wait=true \
                 -f /opt/yaml/pvc-attach.yaml 2>&1 )"
         result=$?
         log $DEBUG "Output of deleting mount-helper: [$text]"
@@ -1158,7 +1313,7 @@ data:
         fi
 
         # get profile of the files before shredding
-        kubectl exec -n vault "$helper" -- \
+        $KUBECTL exec -n vault "$helper" -- \
             bash -c 'find /mnt/data -type f \
                 | sort | xargs wc | head -n-1' \
             >/tmp/shred_before.txt 2>&1
@@ -1171,7 +1326,7 @@ data:
         # The shred by default has three randomized passes, and with -z
         # option will finalize with zeros.  -f prompts shred to work
         # around any unexpected file permissions
-        text="$( kubectl exec -n vault "$helper" -- \
+        text="$( $KUBECTL exec -n vault "$helper" -- \
             bash -c '\
                 result=0; \
                 while read fname; do \
@@ -1182,7 +1337,7 @@ data:
         result=$?
 
         # get profile of the files after shredding
-        kubectl exec -n vault "$helper" -- \
+        $KUBECTL exec -n vault "$helper" -- \
             bash -c 'find /mnt/data -type f \
                 | sort | xargs wc | head -n-1' \
             >/tmp/shred_after.txt 2>&1
@@ -1233,7 +1388,7 @@ data:
 
         name="$( pvcExists )"
         if [ $? -eq 0 ] && [[ "$name" =~ ^manager-pvc ]]; then
-            text="$( kubectl delete persistentvolumeclaims -n vault \
+            text="$( $KUBECTL delete persistentvolumeclaims -n vault \
                 "$name" 2>&1 )"
             if [ $? -ne 0 ]; then
                 log $ERROR "Error deleting PVC: [$text]"
@@ -1268,7 +1423,7 @@ data:
         fi
 
         # run the pod
-        output="$( kubectl apply -f /opt/yaml/pvc-attach.yaml 2>&1 )"
+        output="$( $KUBECTL apply -f /opt/yaml/pvc-attach.yaml 2>&1 )"
         if [ $? -ne 0 ]; then
             log $ERROR "Failed to apply mount-helper"
             log $DEBUG "Output: [$output]"
@@ -1282,7 +1437,7 @@ data:
         log $INFO "Waiting for mount-helper pod to run"
         while [ -z "$pod" -a "$count" -le "$MAX_POD_RUN_TRIES"  ]; do
             count=$((count+1))
-            text="$( kubectl get pods -n vault | grep "mount-helper" )"
+            text="$( $KUBECTL get pods -n vault | grep "mount-helper" )"
             pod="$( echo "$text" | grep "Running" | awk '{print $1}' )"
             if [ -z "$pod" ]; then
                 sleep 1
@@ -1297,7 +1452,7 @@ data:
         fi
 
         # get the pvc data
-        PVCtext="$( kubectl exec -n vault "$pod" \
+        PVCtext="$( $KUBECTL exec -n vault "$pod" \
                     -- cat /mnt/data/cluster_keys.json )"
         if [ $? -ne 0 -o -z "$PVCtext" ]; then
             log $ERROR "Failed to read cluster_keys.json"
@@ -1308,7 +1463,7 @@ data:
 
         # if the Root secret is pre-existing, compare the existing
         # shard secrets and root secret before deleting the PVC
-        kubectl get secrets -n vault cluster-key-root >/dev/null 2>&1
+        $KUBECTL get secrets -n vault cluster-key-root >/dev/null 2>&1
         if [ $? -eq 0 ]; then
             log $INFO "Cluster secrets exist:" \
                 "validating"
@@ -3008,6 +3163,9 @@ data:
 
     exit_on_trap 1
 
+    # Match kubectl version to server version (or etc)
+    pickK8sVersion
+
     # check if this pod is helping to convert storage from pvc to k8s
     # secrets
     mountHelper
@@ -3095,6 +3253,8 @@ data:
     while true; do
         exit_on_trap 10
         sleep "$STATUS_RATE"
+        exit_on_trap 20
+        pickK8sVersion # check if the k8s server version is changed
         rm $WORKDIR/pods.txt
         echo "" > "$PODREC_TMP_F"
         exit_on_trap 11

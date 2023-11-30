@@ -1,4 +1,4 @@
-From c271b6865e6c1bcbca6372f8b3b2db6d19ec9e89 Mon Sep 17 00:00:00 2001
+From fda70b8f0e34be97e9c80251afdec45518314ab1 Mon Sep 17 00:00:00 2001
 From: Greg Waines <greg.waines@windriver.com>
 Date: Sat, 5 Nov 2022 20:14:58 -0400
 Subject: [PATCH] Add vault manager repository to values.yaml
@@ -15,16 +15,18 @@ vault rekey.
 Add option to enable/disable rekey of vault after conversion of storage
 backend from PVC to k8s secrets.
 
+Add option to select kubectl version.
+
 Signed-off-by: Michel Thebeau <michel.thebeau@windriver.com>
 ---
- values.yaml | 68 +++++++++++++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 68 insertions(+)
+ values.yaml | 74 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 74 insertions(+)
 
 diff --git a/values.yaml b/values.yaml
-index 9e35ac8..0da34a5 100644
+index 9e35ac8..3e311d6 100644
 --- a/values.yaml
 +++ b/values.yaml
-@@ -40,6 +40,74 @@ global:
+@@ -40,6 +40,80 @@ global:
      # See the top level serverTelemetry section below before enabling this feature.
      prometheusOperator: false
  
@@ -95,6 +97,12 @@ index 9e35ac8..0da34a5 100644
 +    #   https://developer.hashicorp.com/vault/api-docs/v1.13.x/system/rekey
 +    #
 +    enableOnPVCConversion: true
++
++  k8s:
++    # The major/minor version of kubectl client binary to use.  Must
++    # exist within the vault manager image for example
++    #      client_version: v1.28
++    client_version: ""
 +
  injector:
    # True if you want to enable vault agent injection.

@@ -1,4 +1,4 @@
-From 5db06329aa7ac13d3a9bf041071bfcb715d11934 Mon Sep 17 00:00:00 2001
+From 3ea54def194ee7c79b3ade000825fdad07603d24 Mon Sep 17 00:00:00 2001
 From: Michel Thebeau <Michel.Thebeau@windriver.com>
 Date: Fri, 29 Sep 2023 21:23:19 +0000
 Subject: [PATCH] Add log level option for vault-manager
@@ -18,12 +18,12 @@ Signed-off-by: Michel Thebeau <Michel.Thebeau@windriver.com>
  1 file changed, 9 insertions(+)
 
 diff --git a/values.yaml b/values.yaml
-index c0a0f9e..e9547fd 100644
+index f35df52..600d632 100644
 --- a/values.yaml
 +++ b/values.yaml
-@@ -102,6 +102,15 @@ manager:
-     #
-     enableOnPVCConversion: true
+@@ -114,6 +114,15 @@ manager:
+     #      client_version: v1.28
+     client_version: ""
  
 +  # Debugging option to improve log reading, allow more verbose logging
 +  #   DEBUG: 1

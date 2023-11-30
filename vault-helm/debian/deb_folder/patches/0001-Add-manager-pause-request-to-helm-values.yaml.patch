@@ -1,4 +1,4 @@
-From 3e899dcd7bced1de65b59ce3a1aa7d9b8c78bc55 Mon Sep 17 00:00:00 2001
+From 632a43d0fb4661c0bd1ca7a03e6dee69c1d9974e Mon Sep 17 00:00:00 2001
 From: Michel Thebeau <Michel.Thebeau@windriver.com>
 Date: Mon, 6 Nov 2023 19:28:52 +0000
 Subject: [PATCH] Add manager pause request to helm values.yaml
@@ -17,10 +17,10 @@ Signed-off-by: Michel Thebeau <Michel.Thebeau@windriver.com>
  1 file changed, 7 insertions(+)
 
 diff --git a/values.yaml b/values.yaml
-index e9547fd..fc22705 100644
+index 600d632..ac35eb2 100644
 --- a/values.yaml
 +++ b/values.yaml
-@@ -111,6 +111,13 @@ manager:
+@@ -123,6 +123,13 @@ manager:
    log:
      defaultLogLevel: 2
  
