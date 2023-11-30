@@ -2000,7 +2000,8 @@ data:
             cluster-rekey-shuffle \
             cluster-rekey-audit
         if [ $? -eq 0 ]; then
-            log $WARNING "Check initialization out of order"
+            # this presents a recovery procedure for one of those
+            # procedure steps
             return 1
         fi
 
@@ -2349,7 +2350,7 @@ data:
             cluster-rekey-audit
         if [ $? -eq 0 ]; then
             log $WARNING "Check verify out of order"
-            return 2
+            return 1
         fi
 
         return 0
@@ -2515,7 +2516,22 @@ data:
         assertRekeyStarted --not
         progress=$?
         if [ "$progress" -ne 0 ]; then
+            # 1 - maintain the status of rekey in progress
+            # 2 - api error, try again later
             return "$progress"
+        fi
+
+        secretExists cluster-rekey-verified >/dev/null
+        if [ $? -ne 0 ]; then
+            # proceeds to check procedure step
+            return 1
+        fi
+
+        secretsExistAny cluster-rekey-shuffle \
+            cluster-rekey-audit
+        if [ $? -eq 0 ]; then
+            # proceed to recovery
+            return 1
         fi
 
         assertShardSecrets cluster-rekey
@@ -2530,31 +2546,16 @@ data:
                 return 1
                 ;;
             *)
-                log $ERROR "The number key shared secrets for" \
+                # with cluster-rekey-verified, an incomplete set of
+                # cluster-rekey indicates partial deletion after copying
+                # to  cluster-key
+                # will want to audit the cluster-key secrets before
+                # deleting cluster-rekey
+                log $WARNING "The number key shard secrets for" \
                     "cluster-rekey is not complete"
-                return 2
+                return 1
                 ;;
         esac
-
-        secretExists cluster-rekey-verified >/dev/null
-        if [ $? -ne 0 ]; then
-            # is it possible that the vault server cancelled the rekey
-            # request?
-            # There is no rekey in progress, and there is a set of
-            # cluster-rekey secrets, but vault-manager hasn't verified
-            #
-            # Or did vault-manager exit unexpectedly
-            return 1
-        fi
-
-        # normally should not need to check, but useful when
-        # running manually
-        secretsExistAny cluster-rekey-shuffle \
-            cluster-rekey-audit
-        if [ $? -eq 0 ]; then
-            log $WARNING "Check cluster-key shuffle out of order"
-            return 2
-        fi
 
         # otherwise allow rekeyShuffleKeys to be re-entrant to
         # the existance of or lack of cluster-key and cluster-key-bk
@@ -2757,8 +2758,8 @@ data:
 
         secretExists cluster-rekey-audit >/dev/null
         if [ $? -eq 0 ]; then
-            log $ERROR "rekey audit already completed"
-            return 1
+            log $INFO "rekey audit already completed"
+            return 3
         fi
 
         assertShardSecrets cluster-key
@@ -2900,6 +2901,7 @@ data:
         fi
         assertServerStatus "$REKEY_STATUS_JSON"
         if [ $? -ne 0 ]; then
+            # wait for the vault servers to sync
             return 1
         fi
 
@@ -2908,6 +2910,9 @@ data:
             | jq -r '.verification_nonce' )"
         if [ "$inprogress" == "true" ]; then
             # If a rekey is in progress, then cancel it
+            # - an authentication will reinitialize
+            # - a verification will reinitialtize
+            # - a rekeyAudit will retry
             log $INFO "Cancelling rekey in progress"
             NO_HEADER=true \
             API_TMOUT=$API_REKEY_OP_TMOUT \
@@ -2932,81 +2937,101 @@ data:
         secretExists cluster-rekey-audit >/dev/null
         audit_exists=$?
 
-        # Handle condition where secrets were shuffled but vault-manager
-        # failed before recording the milestone cluster-rekey-shuffle
-        if [ "$verified_exists" -eq 0 \
-            -a "$shuffle_exists" -ne 0 ]; then
-            if [ "$rekey_exists" -eq "$KEY_SECRET_SHARES" ]; then
+        # review each of the milestones to discern the failure point
+        if [ "$audit_exists" -eq 0 ]; then
+            true
+            # no recovery options here
+            # pass through
+        elif [ "$shuffle_exists" -eq 0 ]; then
+            true
+            # no recovery options here
+            # pass through
+        elif [ "$verified_exists" -eq 0 ]; then
+            if [ "$rekey_exists" -gt 0 ]; then
+                if [ "$rekey_exists" -lt "$KEY_SECRET_SHARES" ]; then
+                    # with verified_exists, indicates partial deletion
+                    # of the cluster-rekey secrets after copying to
+                    # cluster-key.  Audit the cluster-key secrets before
+                    # deleting rekey
+                    rekeyAudit cluster-key
+                    if [ $? -ne 0 ]; then
+                        log $ERROR "Audit cluster-key fails with a" \
+                            "partial set of cluster-rekey"
+                        return 1
+                    fi
+
+                    deleteShardSecrets cluster-rekey
+                fi
+
+                # Handle condition where secrets were shuffled but
+                # vault-manager failed before recording the
+                # milestone cluster-rekey-shuffle
+
                 # auditRekey will double-check that cluster-key is
                 # in use
                 set_secret cluster-rekey-shuffle /dev/stdin \
                     <<<"$( get_secret cluster-rekey-request )"
                 log $INFO "Continuing rekey procedure with audit" \
                     "of cluster-key"
-                return
+                return 0
             fi
-        fi
+            # else: pass through
+        else
+            if [ "$rekey_exists" -eq 0 ]; then
+                # Handle condition where an active server fails during
+                # verification: vault may have cancelled the rekey procedure
 
+                # This question is: which shards are the vault servers
+                # using?
+                log $INFO "Recovering from mismatch of cluster-rekey" \
+                    "and verified status"
 
-        # Handle condition where verification is in progress but
-        # vault-manager did not store shards.  The rekey was canceled
-        # above
-        if [ "$inprogress" == "true" ]; then
-            if [ "$rekey_exists" -gt 0 ]; then
-                # cluster-rekey secrets do not exist or
-                # partial set exists
-                secretsExistAny cluster-rekey-verified \
-                    cluster-rekey-shuffle \
-                    cluster-rekey-audit
-
-                if [ $? -ne 0 ]; then
-                    # the rekey procedure will restart
-                    if [ "$rekey_exists" -lt "$KEY_SECRET_SHARES" ]; then
-                        log $INFO "Deleting partial set of" \
-                            "cluster-rekey secrets"
-                        deleteShardSecrets cluster-rekey
-                    fi
-                    return
+                # Audit the existing shards to see which ones the
+                # vault servers are keyed for.
+                # Most likely that the verification failed due to
+                # active server failing, start with cluster-key
+                rekeyAudit cluster-key
+                if [ $? -eq 0 ]; then
+                    # The rekey verification did not complete
+                    # remove cluster-rekey secrets
+                    # The rekey procedure should restart
+                    deleteShardSecrets cluster-rekey
+                    log $INFO "Restart rekey procedure"
+                    return 0
                 fi
+
+                # this happens when vault-manager process is killed
+                rekeyAudit cluster-rekey
+                if [ $? -eq 0 ]; then
+                    set_secret cluster-rekey-verified /dev/null \
+                        <<<$( get_secret cluster-rekey-request )
+                    log $INFO "Continue rekey procedure with cluster-rekey"
+                    return 0
+                fi
+                # else: pass through
+            elif [ "$rekey_exists" -eq 5 ]; then
+                # There are no cluster-rekey secrets; and the rekey is
+                # cancelled: the rekey procedure will restart
+                log $INFO "Continue rekey procedure with initialization"
+                return 0
+            else # cluster-rekey secrets are incomplete
+                # Handle condition where verification is needed but
+                # vault-manager did not store shards.  The rekey was
+                # canceled above
+
+                # assert cluster-key before deleteing rekey
+                rekeyAudit cluster-key
+                if [ $? -eq 0 ]; then
+                    # the rekey procedure will restart
+                    log $INFO "Deleting partial set of" \
+                        "cluster-rekey secrets"
+                    deleteShardSecrets cluster-rekey
+                    return 0
+                fi
+                # else: pass through
             fi
         fi
 
-        # Handle condition where an active server fails during
-        # verification: vault may have cancelled the rekey procedure
-        if [ "$rekey_exists" -eq 0 \
-            -a "$verified_exists" -ne 0 ]; then
-
-            # This question is: which shards are the vault servers
-            # using?
-            log $INFO "Recovering from mismatch of cluster-rekey" \
-                "and verified status"
-
-            # Audit the existing shards to see which ones the
-            # vault servers are keyed for.
-            # Most likely that the verification failed due to
-            # active server failing, start with cluster-key
-            rekeyAudit cluster-key
-            if [ $? -eq 0 ]; then
-                # The rekey verification did not complete
-                # remove cluster-rekey secrets
-                # The rekey procedure should restart
-                deleteShardSecrets cluster-rekey
-                log $INFO "Restart rekey procedure"
-                return 0
-            fi
-
-            # this happens when vault-manager process is killed
-            rekeyAudit cluster-rekey
-            if [ $? -eq 0 ]; then
-                set_secret cluster-rekey-verified /dev/null \
-                    <<<$( get_secret cluster-rekey-request )
-                log $INFO "Continue rekey procedure with cluster-rekey"
-                return 0
-            fi
-
-            # try again later
-            return 1
-        fi
         log $ERROR "Did not recover from current rekey status"
     }
 
@@ -3059,6 +3084,19 @@ data:
                 return
                 ;;
             1)  # continue to procedure step
+                ;;
+            3)  # audit is already completed
+                secretExists cluster-rekey-audit >/dev/null
+                if [ $? -eq 0 ]; then
+                    # the cluster-key secrets were audit, but vault
+                    # manager didn't get a chance to set
+                    # cluster-rekey-audit milestone
+                    finalizeRekey
+                    return
+                fi
+                log $ERROR "Discrepancy between needsAudit and" \
+                    "rekeyVault"
+                return
                 ;;
             *)
                 # an error occurs for which the procedure should not
