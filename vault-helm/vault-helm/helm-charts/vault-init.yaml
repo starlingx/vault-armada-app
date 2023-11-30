@@ -1519,17 +1519,6 @@ data:
         convertPVC
     }
 
-    if ! which uuidgen; then
-        # delete me when uuidgen is added to vault-manager docker image
-        function uuidgen {
-            # not a uuid generator, but close enough for test/debug
-            echo "05f72ea1-36f3-4bff-bb1e-$(
-                for i in 1 2 3; do
-                    printf "%04d" $( expr $RANDOM % 9999 );
-                done )"
-        }
-    fi
-
     # When enabled, after conversion of storage from PVC to k8s secrets,
     # Vault-manager will prompt itself to rekey the vault server
     # storage.
