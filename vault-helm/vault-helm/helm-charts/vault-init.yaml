@@ -3282,6 +3282,16 @@ data:
         sleep "$STATUS_RATE"
         exit_on_trap 20
         pickK8sVersion # check if the k8s server version is changed
+
+        count=$( kubectl get pods -n "${VAULT_NS}" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+            | grep "^${VAULT_FN}-manager" | wc -w )
+        if [ "$count" -gt 1 ]; then
+            log $ERROR "Multiple instances of vault manager detected. Waiting until one left"
+            exit_on_trap 21
+            continue
+        fi
+
         rm $WORKDIR/pods.txt
         echo "" > "$PODREC_TMP_F"
         exit_on_trap 11
