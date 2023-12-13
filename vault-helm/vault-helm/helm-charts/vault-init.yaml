@@ -1128,7 +1128,7 @@ data:
     # Prints the name of the secret
     function secretExists {
         local name="$1"
-        $KUBECTL get secrets -n vault "$name" \
+        $KUBECTL get secrets -n "$VAULT_NS" "$name" \
             -o jsonpath='{.metadata.name}' 2>/dev/null \
         | grep "$name"
     }
@@ -1219,7 +1219,7 @@ data:
     function deleteSecrets {
         local secrets="$@"
         local text
-        text="$( $KUBECTL delete secrets -n vault \
+        text="$( $KUBECTL delete secrets -n "$VAULT_NS" \
             $secrets 2>&1 )"
         if [ $? -ne 0 ]; then
             log $ERROR "Error deleting secrets: ["$text"]"
@@ -1245,7 +1245,7 @@ data:
         # the grep makes sure the result contains the 'manager-pvc'
         # string (as opposed to 'null' for example)
         text="$(
-            $KUBECTL get persistentvolumeclaims -n vault -o json \
+            $KUBECTL get persistentvolumeclaims -n "$VAULT_NS" -o json \
             | jq -r "$jqscript" 2>/dev/null \
             | grep manager-pvc )"
         result=$?
@@ -1272,7 +1272,7 @@ data:
         # this kubectl query returns zero whether manager-pvc is
         # found or not
         # result variable is either empty or 'manager-pvc'
-        result="$( $KUBECTL get pods -n vault \
+        result="$( $KUBECTL get pods -n "$VAULT_NS" \
             -o jsonpath="{${cspec}.${vspec}}" )"
 
         if [ -n "$result" ]; then
@@ -1313,7 +1313,7 @@ data:
         fi
 
         # get profile of the files before shredding
-        $KUBECTL exec -n vault "$helper" -- \
+        $KUBECTL exec -n "$VAULT_NS" "$helper" -- \
             bash -c 'find /mnt/data -type f \
                 | sort | xargs wc | head -n-1' \
             >/tmp/shred_before.txt 2>&1
@@ -1326,7 +1326,7 @@ data:
         # The shred by default has three randomized passes, and with -z
         # option will finalize with zeros.  -f prompts shred to work
         # around any unexpected file permissions
-        text="$( $KUBECTL exec -n vault "$helper" -- \
+        text="$( $KUBECTL exec -n "$VAULT_NS" "$helper" -- \
             bash -c '\
                 result=0; \
                 while read fname; do \
@@ -1337,7 +1337,7 @@ data:
         result=$?
 
         # get profile of the files after shredding
-        $KUBECTL exec -n vault "$helper" -- \
+        $KUBECTL exec -n "$VAULT_NS" "$helper" -- \
             bash -c 'find /mnt/data -type f \
                 | sort | xargs wc | head -n-1' \
             >/tmp/shred_after.txt 2>&1
@@ -1388,8 +1388,8 @@ data:
 
         name="$( pvcExists )"
         if [ $? -eq 0 ] && [[ "$name" =~ ^manager-pvc ]]; then
-            text="$( $KUBECTL delete persistentvolumeclaims -n vault \
-                "$name" 2>&1 )"
+            text="$( $KUBECTL delete persistentvolumeclaims \
+                -n "$VAULT_NS" "$name" 2>&1 )"
             if [ $? -ne 0 ]; then
                 log $ERROR "Error deleting PVC: [$text]"
             else
@@ -1437,7 +1437,8 @@ data:
         log $INFO "Waiting for mount-helper pod to run"
         while [ -z "$pod" -a "$count" -le "$MAX_POD_RUN_TRIES"  ]; do
             count=$((count+1))
-            text="$( $KUBECTL get pods -n vault | grep "mount-helper" )"
+            text="$( $KUBECTL get pods -n "$VAULT_NS" \
+                | grep "mount-helper" )"
             pod="$( echo "$text" | grep "Running" | awk '{print $1}' )"
             if [ -z "$pod" ]; then
                 sleep 1
@@ -1452,7 +1453,7 @@ data:
         fi
 
         # get the pvc data
-        PVCtext="$( $KUBECTL exec -n vault "$pod" \
+        PVCtext="$( $KUBECTL exec -n "$VAULT_NS" "$pod" \
                     -- cat /mnt/data/cluster_keys.json )"
         if [ $? -ne 0 -o -z "$PVCtext" ]; then
             log $ERROR "Failed to read cluster_keys.json"
@@ -1463,7 +1464,8 @@ data:
 
         # if the Root secret is pre-existing, compare the existing
         # shard secrets and root secret before deleting the PVC
-        $KUBECTL get secrets -n vault cluster-key-root >/dev/null 2>&1
+        $KUBECTL get secrets -n "$VAULT_NS" \
+            cluster-key-root >/dev/null 2>&1
         if [ $? -eq 0 ]; then
             log $INFO "Cluster secrets exist:" \
                 "validating"
@@ -1782,7 +1784,7 @@ data:
         local records
         local count
 
-        records="$( grep "^/sva-vault" "$PODREC_F" )"
+        records="$( grep "^/$VAULT_FN" "$PODREC_F" )"
         count="$( awk -F/ '{print $2}' <<<"$records" | wc -w )"
         if [ "$count" -ne "$HA_REPLICAS" ]; then
             return 1
@@ -1797,7 +1799,7 @@ data:
         local records
         local count
 
-        records="$( grep "^/sva-vault" "$PODREC_F" )"
+        records="$( grep "^/$VAULT_FN" "$PODREC_F" )"
         count="$( grep "/false/" <<<"$records" \
             | awk -F/ '{print $2}' | wc -w )"
         if [ "$count" -ne "$HA_REPLICAS" ]; then
@@ -1814,7 +1816,7 @@ data:
         local records
         local count
 
-        records="$( grep "^/sva-vault" "$PODREC_F" )"
+        records="$( grep "^/$VAULT_FN" "$PODREC_F" )"
         count="$( echo "$records" | awk -F/ '{print $3}' | wc -w )"
         if [ "$count" -ne "$HA_REPLICAS" ]; then
             return 1
@@ -1962,7 +1964,7 @@ data:
 
         # The above three tests are based on output of kubectl get pods
         # command. Doublecheck with REST API call to each server
-        pods="$( getVaultPods | grep "^sva-vault" | awk '{print $2}' )"
+        pods="$( getVaultPods | grep "^$VAULT_FN" | awk '{print $2}' )"
         for pod in $pods; do
             NO_HEADER=true \
             API_TMOUT=$QUERY_TMOUT \
