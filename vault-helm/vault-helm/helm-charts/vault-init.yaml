@@ -1924,7 +1924,13 @@ data:
         local sealed
         local response
 
-        secretExists cluster-rekey-request >/dev/null
+        # the first milestone to be created is cluster-rekey-request;
+        # the last milestone to be deleted is cluster-rekey-audit;
+        # proceed if any exists
+        secretsExistAny cluster-rekey-request \
+            cluster-rekey-verified \
+            cluster-rekey-shuffle \
+            cluster-rekey-audit
         if [ $? -ne 0 ]; then
             # rekey is not requested
             return 1
@@ -1994,14 +2000,11 @@ data:
             return "$progress"
         fi
 
-        # normally should not need to check, but useful when
-        # running manually
+        # skip if this represents a recovery path
         secretsExistAny cluster-rekey-verified \
             cluster-rekey-shuffle \
             cluster-rekey-audit
         if [ $? -eq 0 ]; then
-            # this presents a recovery procedure for one of those
-            # procedure steps
             return 1
         fi
 
@@ -2118,20 +2121,18 @@ data:
             return 1
         fi
 
-        # this check should not be necessary
+        # this represents a recovery path
         assertShardSecrets cluster-rekey --nokeys
         if [ $? -ne 0 ]; then
             # There are already cluster-rekey secrets
             return 1
         fi
 
-        # normally should not need to check, but useful when
-        # running manually
+        # skip if this represents a recovery path
         secretsExistAny cluster-rekey-verified \
             cluster-rekey-shuffle \
             cluster-rekey-audit
         if [ $? -eq 0 ]; then
-            log $WARNING "Check authentication out of order"
             return 1
         fi
 
@@ -2343,13 +2344,11 @@ data:
             return 1
         fi
 
-        # normally should not need to check, but useful when
-        # running manually
+        # skip if this represents a recovery path
         secretsExistAny cluster-rekey-verified \
             cluster-rekey-shuffle \
             cluster-rekey-audit
         if [ $? -eq 0 ]; then
-            log $WARNING "Check verify out of order"
             return 1
         fi
 
@@ -2523,14 +2522,14 @@ data:
 
         secretExists cluster-rekey-verified >/dev/null
         if [ $? -ne 0 ]; then
-            # proceeds to check procedure step
+            # proceeds to next procedure step
             return 1
         fi
 
+        # skip if this represents a recovery path
         secretsExistAny cluster-rekey-shuffle \
             cluster-rekey-audit
         if [ $? -eq 0 ]; then
-            # proceed to recovery
             return 1
         fi
 
@@ -2741,6 +2740,16 @@ data:
             return "$progress"
         fi
 
+        # Select recovery path with response '3'
+        secretExists cluster-rekey-audit >/dev/null
+        if [ $? -eq 0 ]; then
+            # this path indicates a failure to complete
+            # finalizeRekey. cluster-rekey-audit is the last
+            # milestone to be deleted
+            log $INFO "rekey audit already completed"
+            return 3
+        fi
+
         secretExists cluster-rekey-request >/dev/null
         if [ $? -ne 0 ]; then
             return 1
@@ -2754,12 +2763,6 @@ data:
         secretExists cluster-rekey-shuffle >/dev/null
         if [ $? -ne 0 ]; then
             return 1
-        fi
-
-        secretExists cluster-rekey-audit >/dev/null
-        if [ $? -eq 0 ]; then
-            log $INFO "rekey audit already completed"
-            return 3
         fi
 
         assertShardSecrets cluster-key
@@ -2843,11 +2846,16 @@ data:
     # clean up the artifacts from rekey procedure
     # The audit procedure proves the shards in cluster-key
     # secrets will unseal the vault.
+    #
+    # If vault-manager is killed during this procedure step it should
+    # continue to try to delete the artifacts until finally deleting
+    # cluster-rekey-audit
     function finalizeRekey {
         local secrettext
-        secrettext="$( get_secret cluster-rekey-request )"
+        secrettext="$( get_secret cluster-rekey-audit )"
 
-        log $INFO "removing artifacts of the rekey procedure"
+        log $INFO "removing artifacts of the rekey procedure:" \
+            "$secrettext"
         assertShardSecrets cluster-rekey --nokeys
         if [ $? -ne 0 ]; then
             log $WARNING "removing cluster-rekey secrets" \
@@ -2855,10 +2863,10 @@ data:
             deleteShardSecrets cluster-rekey
         fi
         deleteShardSecrets cluster-key-bk
-        deleteSecrets cluster-rekey-request \
-            cluster-rekey-verified \
-            cluster-rekey-shuffle \
-            cluster-rekey-audit
+        deleteSecrets cluster-rekey-verified
+        deleteSecrets cluster-rekey-shuffle
+        deleteSecrets cluster-rekey-request
+        deleteSecrets cluster-rekey-audit
 
         log $INFO "Rekey request complete: $secrettext"
     }
