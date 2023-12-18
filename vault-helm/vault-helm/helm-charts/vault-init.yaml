@@ -3220,6 +3220,13 @@ data:
     runConversion
     exit_on_trap 19
 
+    # check if PVC still persisted after conversion, and if so issue a warning.
+    PVC_PREEXISTS="$( pvcExists )"
+    PVC_STATUS=$?
+    if [ $PVC_STATUS -eq 0 ]; then
+        log $WARNING "PVC storage $PVC_PREEXISTS deletion has failed during conversion"
+    fi
+
     # Waiting for at least one vault server, to check initialization
     waitForPods 1
     exit_on_trap 2
