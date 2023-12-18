@@ -49,7 +49,7 @@ class VaultHelm(base.FluxCDBaseHelm):
         """Read the number of nodes with worker function"""
         controller = len(self.dbapi.ihost_get_by_personality(constants.CONTROLLER))
         worker = len(self.dbapi.ihost_get_by_personality(constants.WORKER))
-        return controller+worker
+        return controller + worker
 
     def get_overrides(self, namespace=None):
         """Return the system overrides"""
