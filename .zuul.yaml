@@ -1,22 +1,28 @@
 ---
 - project:
+    vars:
+      ensure_tox_version: '<4'
     check:
       jobs:
         - openstack-tox-linters
         - k8sapp-vault-tox-py39
         - k8sapp-vault-tox-pylint
+        - k8sapp-vault-tox-flake8
+        - k8sapp-vault-tox-metadata
     gate:
       jobs:
         - openstack-tox-linters
         - k8sapp-vault-tox-py39
         - k8sapp-vault-tox-pylint
+        - k8sapp-vault-tox-flake8
+        - k8sapp-vault-tox-metadata
     post:
       jobs:
         - stx-vault-armada-app-upload-git-mirror
 
 - job:
     name: k8sapp-vault-tox-py39
-    parent: tox-py39
+    parent: openstack-tox-py39
     description: |
         Run py39 for vault armada app
     nodeset: debian-bullseye
@@ -25,12 +31,70 @@
       - starlingx/fault
       - starlingx/update
       - starlingx/utilities
+      - starlingx/root
     files:
       - python3-k8sapp-vault/*
     vars:
-        tox_envlist: py39
-        python_version: 3.9
         tox_extra_args: -c python3-k8sapp-vault/k8sapp_vault/tox.ini
+        tox_constraints_file: '{{ ansible_user_dir }}/src/opendev.org/starlingx/root/build-tools/requirements/debian/upper-constraints.txt'
+
+- job:
+    name: k8sapp-vault-tox-metadata
+    parent: tox
+    description: |
+      Run metadata test for k8sapp_vault
+    nodeset: debian-bullseye
+    required-projects:
+      - starlingx/config
+      - starlingx/fault
+      - starlingx/update
+      - starlingx/utilities
+      - starlingx/root
+    files:
+      - python3-k8sapp-vault/*
+    vars:
+      tox_envlist: metadata
+      tox_extra_args: -c python3-k8sapp-vault/k8sapp_vault/tox.ini
+      tox_constraints_file: '{{ ansible_user_dir }}/src/opendev.org/starlingx/root/build-tools/requirements/debian/upper-constraints.txt'
+
+- job:
+    name: k8sapp-vault-tox-pylint
+    parent: tox
+    description: |
+      Run pylint test for k8sapp_vault
+    nodeset: debian-bullseye
+    required-projects:
+      - starlingx/config
+      - starlingx/fault
+      - starlingx/update
+      - starlingx/utilities
+      - starlingx/root
+    files:
+      - python3-k8sapp-vault/*
+    vars:
+      tox_envlist: pylint
+      tox_extra_args: -c python3-k8sapp-vault/k8sapp_vault/tox.ini
+      tox_constraints_file: '{{ ansible_user_dir }}/src/opendev.org/starlingx/root/build-tools/requirements/debian/upper-constraints.txt'
+
+- job:
+    name: k8sapp-vault-tox-flake8
+    parent: tox
+    description: |
+      Run flake8 test for k8sapp_vault
+    nodeset: debian-bullseye
+    required-projects:
+      - starlingx/config
+      - starlingx/fault
+      - starlingx/update
+      - starlingx/utilities
+      - starlingx/root
+    files:
+      - python3-k8sapp-vault/*
+    vars:
+      tox_envlist: flake8
+      tox_extra_args: -c python3-k8sapp-vault/k8sapp_vault/tox.ini
+      tox_constraints_file: '{{ ansible_user_dir }}/src/opendev.org/starlingx/root/build-tools/requirements/debian/upper-constraints.txt'
+
 - job:
     name: stx-vault-armada-app-upload-git-mirror
     parent: upload-git-mirror
@@ -43,23 +107,6 @@
       - name: git_mirror_credentials
         secret: stx-vault-armada-app-github-secret2
         pass-to-parent: true
-
-- job:
-    name: k8sapp-vault-tox-pylint
-    parent: tox
-    description: |
-      Run pylint test for k8sapp_vault
-    nodeset: ubuntu-bionic
-    required-projects:
-      - starlingx/config
-      - starlingx/fault
-      - starlingx/update
-      - starlingx/utilities
-    files:
-      - python3-k8sapp-vault/*
-    vars:
-      tox_envlist: pylint
-      tox_extra_args: -c python3-k8sapp-vault/k8sapp_vault/tox.ini
 
 - secret:
     name: stx-vault-armada-app-github-secret2
@@ -138,4 +185,4 @@
           UlcQK6MHMgwhqfZI2RmbARFgPov9OzmKrM8M4AZ4TYQwdgj57na6DOl7UEal5cHWsvR+8
           t230YyZJ6MLy9l6R2zHPicgbJj3w5aERp3ipTkofL47FokPT8eFtPhy5BYIKFtjPDNAc7
           2LF69MtEMJtfb9g6u4uzOp5Y/bg+4fsDYWd5Dw7kRjeKvWmmH9Uplh6Y569GW2z2NFekr
-          QxX8x0Bpt4ZvOGXiJIP0KWcFAEceSjds6DPzCX9z8HyK9CWX0aFC2R4Wis8PyY= 
+          QxX8x0Bpt4ZvOGXiJIP0KWcFAEceSjds6DPzCX9z8HyK9CWX0aFC2R4Wis8PyY=
