@@ -4,18 +4,13 @@ export DH_VERBOSE = 1
 export ROOT = debian/tmp
 export APP_FOLDER = $(ROOT)/usr/lib/helm
 
-export APP_TARBALL = vault-0.24.1.tgz
+export APP_TARBALL = vault-0.25.0.tgz
 export STAGING = staging
 
 %:
 	dh $@
 
 override_dh_auto_build:
-	# Host a server for the helm charts.
-	chartmuseum --debug --port=8879 --context-path='/charts' --storage="local" \
-		--storage-local-rootdir="." &
-	sleep 2
-	helm repo add local http://localhost:8879/charts
 	# Set up chart build files.
 	mkdir vault
 	cp Chart.yaml values.yaml vault
@@ -24,8 +19,6 @@ override_dh_auto_build:
 	mv templates vault/templates
 	# Create the TGZ file.
 	make vault
-	# Terminate the helm chart server.
-	pkill chartmuseum
 
 override_dh_auto_install:
 	# Install the app tar file.

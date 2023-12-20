@@ -1,0 +1,30 @@
+From 77dfc57300718e71f342fa2bc804452ed3fae4be Mon Sep 17 00:00:00 2001
+From: Michel <michel.thebeau@windriver.com>
+Date: Fri, 5 Jan 2024 04:24:42 -0500
+Subject: [PATCH] Update vault version to 1.14.8
+
+vault-helm chart application is using vault version 1.14.0.
+There are 401 changes between vault v1.14.0 and v1.14.8 tags (https://github.com/hashicorp/vault):
+80% are 'backport'', "cherry-pick" of commits - bug fixes. Updating to latest vault version.
+
+Signed-off-by: Sabyasachi Nayak <sabyasachi.nayak@windriver.com>
+---
+ Chart.yaml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Chart.yaml b/Chart.yaml
+index 104b05f..9c245fb 100644
+--- a/Chart.yaml
++++ b/Chart.yaml
+@@ -4,7 +4,7 @@
+ apiVersion: v2
+ name: vault
+ version: 0.25.0
+-appVersion: 1.14.0
++appVersion: 1.14.8
+ kubeVersion: ">= 1.20.0-0"
+ description: Official HashiCorp Vault Chart
+ home: https://www.vaultproject.io
+-- 
+2.25.1
+
