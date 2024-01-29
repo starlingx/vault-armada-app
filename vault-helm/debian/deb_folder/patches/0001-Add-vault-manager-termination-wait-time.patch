@@ -1,0 +1,42 @@
+From 06b5719c35c7e75b776ce7bd08c6df32c2dcf9cd Mon Sep 17 00:00:00 2001
+From: Tae Park <tae.park@windriver.com>
+Date: Mon, 29 Jan 2024 15:24:37 -0500
+Subject: [PATCH] Add vault manager termination wait time
+
+Adding configure options for maximum number of tries for checking
+PVC removal, and time slept between each tries. Changed the
+default to 60 seconds total wait time
+
+Signed-off-by: Tae Park <tae.park@windriver.com>
+---
+ values.yaml | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/values.yaml b/values.yaml
+index 1bce118..487b44a 100644
+--- a/values.yaml
++++ b/values.yaml
+@@ -114,6 +114,20 @@ manager:
+     #      client_version: v1.28
+     client_version: ""
+ 
++  waitTermination:
++    # During upgrade of the application from PVC storage to storage
++    # using kubernetes, wait for previous version of vault manager
++    # to terminate before proceding with the conversion of storage from PVC to
++    # kubernetes secrets.
++    #
++    # The maximum tries before proceding with the conversion of storage
++    # from PVC to kubernetes secrets.
++    maxTries: 12
++
++    # Number of seconds slept between each tries before proceding with
++    # the conversion of storage from PVC to kubernetes secrets.
++    sleepTime: 5
++
+   # Debugging option to improve log reading, allow more verbose logging
+   #   DEBUG: 1
+   #    INFO: 2
+-- 
+2.25.1
+

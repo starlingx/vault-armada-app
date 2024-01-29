@@ -3,3 +3,4 @@
 0001-Add-log-level-option-for-vault-manager.patch
 0001-Add-manager-pause-request-to-helm-values.yaml.patch
 0001-Update-vault-version-to-1.14.8.patch
+0001-Add-vault-manager-termination-wait-time.patch

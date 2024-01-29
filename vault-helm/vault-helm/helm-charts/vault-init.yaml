@@ -68,8 +68,8 @@ data:
     # Maximum seconds to wait for vault-manager pod to exit
     # Vault-manager is not responding to SIGTERM, so will take 30
     # seconds
-    TERMINATE_TRIES_MAX=6
-    TERMINATE_TRIES_SLEEP=5
+    TERMINATE_TRIES_MAX={{ .Values.manager.waitTermination.maxTries }}
+    TERMINATE_TRIES_SLEEP={{ .Values.manager.waitTermination.sleepTime }}
 
     # Vault key share configuration
     KEY_SECRET_SHARES=5
@@ -1517,6 +1517,11 @@ data:
             sleep "$TERMINATE_TRIES_SLEEP"
             count=$((count-1))
         done
+
+        if [ $count -eq 0 ]; then
+            log $WARNING "Maximum time reached waiting" \
+                "for the previous pod to be terminated."
+        fi
 
         convertPVC
     }
