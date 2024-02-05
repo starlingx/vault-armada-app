@@ -7,7 +7,7 @@ from debian:stable-slim
 # https://kubernetes.io/releases/
 
 ENV KUBE_LATEST_VERSION="v1.28.4"
-ENV KUBE_VERSIONS="v1.28.4 v1.27.8 v1.26.11 v1.25.16 v1.24.17 v1.23.17 v1.22.17 v1.21.14"
+ENV KUBE_VERSIONS="v1.28.6 v1.27.10 v1.26.13 v1.25.16 v1.24.17"
 ENV KUBECTL_DL_URL="https://storage.googleapis.com/kubernetes-release/release/${KUBE_LATEST_VERSION}/bin/linux/amd64/kubectl"
 ENV KUBECTL_INSTALL_PATH="/usr/local/bin"
 
