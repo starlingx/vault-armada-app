@@ -50,8 +50,6 @@
       - starlingx/update
       - starlingx/utilities
       - starlingx/root
-    files:
-      - python3-k8sapp-vault/*
     vars:
       tox_envlist: metadata
       tox_extra_args: -c python3-k8sapp-vault/k8sapp_vault/tox.ini
