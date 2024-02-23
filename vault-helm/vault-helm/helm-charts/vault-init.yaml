@@ -1231,15 +1231,17 @@ data:
 
     # Check if the PVC resource exists
     #
-    # Returns the normal linux success=0, failure!=0
+    # Returns 0 if pvc does not exist
+    # Returns 1 if pvc exists but is terminating
+    # Returns 2 if pvc exists and is not terminating
     # Prints the name of the PVC resource
-    function pvcExists {
+    function pvcRemoved {
         local text
         local jqscript
 
         jqscript='.items
             | map(select(.metadata.name | test("^manager-pvc")))
-            | .[0].metadata.name'
+            | "\(.[0].metadata.name) \(.[0].status.phase)"'
 
         # using jq since kubernetes does not support regex
         # the grep makes sure the result contains the 'manager-pvc'
@@ -1248,13 +1250,20 @@ data:
             $KUBECTL get persistentvolumeclaims -n "$VAULT_NS" -o json \
             | jq -r "$jqscript" 2>/dev/null \
             | grep manager-pvc )"
-        result=$?
 
         if [ -n "$text" ]; then
-            echo "$text"
+            readarray -d " " -t pvcInfo <<< "$text"
+            pvcName="${pvcInfo[0]}"
+            pvcStatus="${pvcInfo[1]}"
+            echo "$pvcName"
+            if [ "$pvcStatus" = "Terminating" ]; then
+                return 1
+            else
+                return 2
+            fi
         fi
 
-        return $result
+        return 0
     }
 
     # Check if the PVC is mounted to any pod in vault namespace
@@ -1386,8 +1395,8 @@ data:
         local text
         local name
 
-        name="$( pvcExists )"
-        if [ $? -eq 0 ] && [[ "$name" =~ ^manager-pvc ]]; then
+        name="$( pvcRemoved )"
+        if [ $? -eq 2 ] && [[ "$name" =~ ^manager-pvc ]]; then
             text="$( $KUBECTL delete persistentvolumeclaims \
                 -n "$VAULT_NS" "$name" 2>&1 )"
             if [ $? -ne 0 ]; then
@@ -1416,6 +1425,7 @@ data:
         local text
         local PVCtext
         local result
+        local waitPVCterm
 
         if testPVCMount; then
             log $ERROR "Cannot mount PVC already mounted"
@@ -1488,6 +1498,10 @@ data:
 
         # clean up but do not care about the result
         deleteMountHelper
+
+        # Sleep before finishing conversion, so that pvc termination process has started
+        waitPVCterm=5
+        sleep $waitPVCterm
 
         return $result
     }
@@ -3219,16 +3233,18 @@ data:
     exit_on_trap 16
     BOOTSTRAP_PREEXISTS="$( secretExists cluster-key-bootstrap )"
     exit_on_trap 17
-    PVC_PREEXISTS="$( pvcExists )"
+    PVC_PREEXISTS="$( pvcRemoved )"
     exit_on_trap 18
 
     runConversion
     exit_on_trap 19
 
     # check if PVC still persisted after conversion, and if so issue a warning.
-    PVC_PREEXISTS="$( pvcExists )"
+    PVC_PREEXISTS="$( pvcRemoved )"
     PVC_STATUS=$?
-    if [ $PVC_STATUS -eq 0 ]; then
+    if [ $PVC_STATUS -eq 1 ]; then
+        log $DEBUG "PVC storage $PVC_PREEXISTS is currently terminating"
+    elif [ $PVC_STATUS -eq 2 ]; then
         log $WARNING "PVC storage $PVC_PREEXISTS deletion has failed during conversion"
     fi
 
