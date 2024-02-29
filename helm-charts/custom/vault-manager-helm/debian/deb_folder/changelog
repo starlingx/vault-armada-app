@@ -1,0 +1,5 @@
+vault-manager-helm (1.0-1) unstable; urgency=medium
+
+  * Initial release.
+
+ --  Tae Park <tae.park@windriver.com>  Fri, 1 Mar 2021 09:08:42 +0000

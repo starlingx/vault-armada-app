@@ -1,7 +1,7 @@
 #
 # Copyright 2017 The Openstack-Helm Authors.
 #
-# Copyright (c) 2019 Wind River Systems, Inc.
+# Copyright (c) 2024 Wind River Systems, Inc.
 #
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -9,8 +9,8 @@
 SHELL := /bin/bash
 TASK  := build
 
-EXCLUDES := helm-toolkit doc tests tools logs tmp
-CHARTS := helm-toolkit $(filter-out $(EXCLUDES), $(patsubst %/.,%,$(wildcard */.)))
+EXCLUDES := doc tests tools logs tmp
+CHARTS := $(filter-out $(EXCLUDES), $(patsubst %/.,%,$(wildcard */.)))
 
 .PHONY: $(EXCLUDES) $(CHARTS)
 
@@ -29,7 +29,7 @@ init-%:
 lint-%: init-%
 	if [ -d $* ]; then helm lint $*; fi
 
-build-%: 
+build-%: lint-%
 	if [ -d $* ]; then helm package --version $(CHART_VERSION) $*; fi
 
 clean:

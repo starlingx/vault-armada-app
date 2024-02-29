@@ -1,0 +1,15 @@
+---
+debname: vault-manager-helm
+debver: 1.0-1
+src_path: vault-manager-helm
+src_files:
+  - vault-manager-helm/Makefile
+  - vault-manager-helm/vault-manager/templates/
+  - vault-manager-helm/vault-manager/Chart.yaml
+  - vault-manager-helm/vault-manager/values.yaml
+revision:
+  dist: $STX_DIST
+  stx_patch: 69
+  GITREVCOUNT:
+    SRC_DIR: ${MY_REPO}/stx/vault-armada-app/helm-charts/custom/vault-manager-helm
+    BASE_SRCREV: 05ccd6fea52da96968134eda00ebe51debd7082a

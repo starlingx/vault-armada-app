@@ -1,0 +1,125 @@
+#
+# Copyright (c) 2020-2024 Wind River Systems, Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+# Values migrated from vault helm chart
+
+vault:
+  name: vault
+  fullname: sva-vault
+
+server:
+  ha:
+    replicas: 1
+
+# Vault Manager specific values
+manager:
+  image:
+    repository: starlingx/stx-vault-manager
+    tag: stx.9.0-v1.28.6-1
+    pullPolicy: IfNotPresent
+
+  chart: vault_0.6.0
+
+  imagePullSecrets: []
+
+  # Rate at which vault-manager checks status of vault servers.
+  # After initialization of the raft, Vault manager will loop forever
+  # checking the pods for vault servers that need to be unsealed.
+  # This value is the sleep, in seconds, between intervals.  Value
+  # must be a positive integer
+  statusCheckRate: 5
+
+  # After initial configuration, in combination with statusCheckRate,
+  # the amount of time to wait before unsealing a recovering vault
+  # server.  The option is intended to allow the active vault server
+  # time to start sending heartbeats to the recovering pod before
+  # unsealing the server.
+  #
+  # A value of 0 indicates no wait time: unseal the vault server without
+  # delay.  The wait time is statusCheckRate * unsealWaitIntervals.
+  # Default is 5 s/interval * 3 intervals == 15 seconds.
+  #
+  unsealWaitIntervals: 3
+
+  api:
+    # Network timeout for queries to vault server /sys/health endpoint
+    #
+    # The maximum time in seconds to wait for a server to respond to
+    # health query.  This applies for the HA recovery situations, not the
+    # initialization of vault cluster.  Unsetting the value is not
+    # recommended, and defaults to timeout of 120 seconds.
+    #
+    # vault-manager will appear to hang if healthQueryTimeout is
+    # over-large.  This setting affects the logs, since vault-manager will
+    # issue a log when the 'sealed' status toggles between true/false and
+    # the 'unknown' value
+    healthQueryTimeout: 2
+
+    # Network timeout for vault API operations against /sys/unseal
+    #
+    # The maximum time in seconds to wait for a server to respond to
+    # the unseal request.
+    unsealOpTimeout: 10
+
+    # Network timeout for queries to vault server /sys/rekey/init
+    # and /sys/rekey/verify
+    #
+    # The maximum time in seconds to wait for a server to respond to
+    # the query.
+    rekeyStatusTimeout: 2
+
+    # Network timeout for vault API operations against /sys/rekey/init
+    # and /sys/rekey/verify
+    #
+    # The maximum time in seconds to wait for a server to respond to
+    # the request.
+    rekeyOpTimeout: 10
+
+  rekey:
+    # During upgrade of the application from PVC storage to storage
+    # using kubernetes, enable vault rekey to run automatically to
+    # resecure the vault with new shards.
+    # See also Hashicorp vault documentation:
+    #   https://developer.hashicorp.com/vault/tutorials/operations/rekeying-and-rotating
+    #   https://developer.hashicorp.com/vault/api-docs/v1.13.x/system/rekey
+    #
+    enableOnPVCConversion: true
+
+  k8s:
+    # The major/minor version of kubectl client binary to use.  Must
+    # exist within the vault manager image for example
+    #      client_version: v1.28
+    client_version: ""
+
+  waitTermination:
+    # During upgrade of the application from PVC storage to storage
+    # using kubernetes, wait for previous version of vault manager
+    # to terminate before proceding with the conversion of storage from PVC to
+    # kubernetes secrets.
+    #
+    # The maximum tries before proceding with the conversion of storage
+    # from PVC to kubernetes secrets.
+    maxTries: 12
+
+    # Number of seconds slept between each tries before proceding with
+    # the conversion of storage from PVC to kubernetes secrets.
+    sleepTime: 5
+
+  # Debugging option to setup pause request for vault manager on startup
+  # A pause_on_trap file will be created with the content of this value
+  # Values may include a positive integer matching a call of
+  # exit_on_trap
+  #
+  # pause: 1
+
+  # Debugging option to improve log reading, allow more verbose logging
+  #   DEBUG: 1
+  #    INFO: 2
+  # WARNING: 3
+  #   ERROR: 4
+  #   FATAL: 5
+  log:
+    defaultLogLevel: 2

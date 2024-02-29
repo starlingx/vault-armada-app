@@ -10,8 +10,8 @@ data:
 
     # Template vaules from helm
     VAULT_NS={{ .Release.Namespace }}
-    VAULT_NAME={{ template "vault.name" .}}
-    VAULT_FN={{ template "vault.fullname" . }}
+    VAULT_NAME={{ .Values.vault.name }}
+    VAULT_FN={{ .Values.vault.fullname }}
     HA_REPLICAS={{ .Values.server.ha.replicas }}
 
     # Set the domain for resolving pod names
@@ -1413,7 +1413,7 @@ data:
     # from PVC.
     #
     # See also the function mountHelper and the ConfigMap named:
-    #     {{ include "vault.name" . }}-mount-helper
+    #     {{ .Values.vault.name }}-mount-helper
     #
     # This function does not support overwriting an existing
     # cluster-key-* secret, but it does support validating those secrets
@@ -3371,7 +3371,7 @@ metadata:
         .: {}
         f:init.sh: {}
     manager: vault-init-unseal
-  name: vault-init-unseal-2
+  name: vault-init-unseal-3
   namespace: {{ .Release.Namespace }}
 ---
 apiVersion: v1
@@ -3384,8 +3384,8 @@ metadata:
       f:data:
         .: {}
         f:pvc-attach.yaml: {}
-    manager: {{ include "vault.name" . }}-mount-helper
-  name: {{ include "vault.name" . }}-mount-helper
+    manager: {{ .Values.vault.name }}-mount-helper
+  name: {{ .Values.vault.name }}-mount-helper
   namespace: {{ .Release.Namespace }}
 data:
   pvc-attach.yaml: |
@@ -3393,7 +3393,7 @@ data:
     apiVersion: batch/v1
     kind: Job
     metadata:
-      name: {{ template "vault.fullname" . }}-mount-helper
+      name: {{ .Values.vault.fullname }}-mount-helper
       namespace: vault
     spec:
       activeDeadlineSeconds: 600
@@ -3403,10 +3403,10 @@ data:
       template:
         spec:
           restartPolicy: Never
-          serviceAccountName: "{{ template "vault.fullname" . }}-vault-manager"
-          {{- if .Values.global.imagePullSecrets }}
+          serviceAccountName: "{{ .Values.vault.fullname }}-manager-1"
+          {{- if .Values.manager.imagePullSecrets }}
           imagePullSecrets:
-            {{- toYaml .Values.global.imagePullSecrets | nindent 12 }}
+            {{- toYaml .Values.manager.imagePullSecrets | nindent 12 }}
           {{- end }}
           {{- if .Values.manager.tolerations }}
           tolerations:
@@ -3415,7 +3415,7 @@ data:
           containers:
             - name: mount
               image: "{{ .Values.manager.image.repository }}:{{ .Values.manager.image.tag }}"
-              imagePullPolicy: "{{ .Values.injector.image.pullPolicy }}"
+              imagePullPolicy: "{{ .Values.manager.image.pullPolicy }}"
               args:
                 - bash
                 - /opt/script/init.sh
@@ -3434,7 +3434,7 @@ data:
           volumes:
           - name: mount-helper
             configMap:
-              name: vault-init-unseal-2
+              name: vault-init-unseal-3
           - name: manager-pvc
             persistentVolumeClaim:
               claimName: manager-pvc-sva-vault-manager-0
@@ -3443,7 +3443,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   namespace: {{ .Release.Namespace }}
-  name: {{ template "vault.fullname" . }}-vault-manager
+  name: {{ .Values.vault.fullname }}-manager-1
 rules:
 - apiGroups: [""] # "" indicates the core API group
   resources: ["pods"]
@@ -3464,41 +3464,39 @@ rules:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ template "vault.fullname" . }}-vault-manager
+  name: {{ .Values.vault.fullname }}-manager-1
   namespace: {{ .Release.Namespace }}
   labels:
-    helm.sh/chart: {{ include "vault.chart" . }}
-    app.kubernetes.io/name: {{ include "vault.name" . }}-vault-manager
+    helm.sh/chart: {{ .Values.manager.chart }}
+    app.kubernetes.io/name: {{ .Values.vault.name }}-manager
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ template "vault.fullname" . }}-vault-manager
+  name: {{ .Values.vault.fullname }}-manager-1
   namespace: {{ .Release.Namespace }}
 subjects:
 - kind: ServiceAccount
-  name: {{ template "vault.fullname" . }}-vault-manager
+  name: {{ .Values.vault.fullname }}-manager-1
 roleRef:
   kind: Role
-  name: {{ template "vault.fullname" . }}-vault-manager
+  name: {{ .Values.vault.fullname }}-manager-1
   apiGroup: rbac.authorization.k8s.io
 ---
-{{- if and (eq (.Values.injector.enabled | toString) "true" ) (eq (.Values.global.enabled | toString) "true") }}
-# Deployment for the unsealer
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ template "vault.fullname" . }}-manager2
+  name: {{ .Values.vault.fullname }}-manager-3
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ include "vault.name" . }}-manager
+    app.kubernetes.io/name: {{ .Values.vault.name }}-manager
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
     component: webhook
 spec:
-  serviceName: {{ template "vault.fullname" . }}
+  serviceName: {{ .Values.vault.fullname }}
   replicas: 1
   selector:
     matchLabels:
@@ -3507,17 +3505,17 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ template "vault.name" . }}-manager
+        app.kubernetes.io/name: {{ .Values.vault.name }}-manager
         app.kubernetes.io/instance: {{ .Release.Name }}
         component: webhook
         {{- if  .Values.manager.extraLabels }}
           {{- toYaml .Values.manager.extraLabels | nindent 8 -}}
         {{- end }}
     spec:
-      serviceAccountName: "{{ template "vault.fullname" . }}-vault-manager"
-      {{- if .Values.global.imagePullSecrets }}
+      serviceAccountName: "{{ .Values.vault.fullname }}-manager-1"
+      {{- if .Values.manager.imagePullSecrets }}
       imagePullSecrets:
-        {{- toYaml .Values.global.imagePullSecrets | nindent 8 }}
+        {{- toYaml .Values.manager.imagePullSecrets | nindent 8 }}
       {{- end }}
       {{- if .Values.manager.tolerations }}
       tolerations:
@@ -3526,7 +3524,7 @@ spec:
       containers:
         - name: manager
           image: "{{ .Values.manager.image.repository }}:{{ .Values.manager.image.tag }}"
-          imagePullPolicy: "{{ .Values.injector.image.pullPolicy }}"
+          imagePullPolicy: "{{ .Values.manager.image.pullPolicy }}"
           args:
             - bash
             - /opt/script/init.sh
@@ -3534,7 +3532,7 @@ spec:
           - name: CA_CERT
             value: /mnt/data/ca/tls.crt
           volumeMounts:
-            - name: vault-init-unseal-2
+            - name: vault-init-unseal-3
               mountPath: /opt/script
               readOnly: false
             - name: mount-helper-yaml
@@ -3544,13 +3542,12 @@ spec:
               mountPath: /mnt/data/ca
               readOnly: true
       volumes:
-        - name: vault-init-unseal-2
+        - name: vault-init-unseal-3
           configMap:
-            name: vault-init-unseal-2
+            name: vault-init-unseal-3
         - name: mount-helper-yaml
           configMap:
-            name: {{ include "vault.name" . }}-mount-helper
+            name: {{ .Values.vault.name }}-mount-helper
         - name: vault-ca
           secret:
             secretName: vault-ca
-{{ end }}

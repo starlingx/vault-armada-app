@@ -1,0 +1,4 @@
+This directory contains the helm chart for Vault Manager. Rather than
+being installed on the Starlingx cluster, this Vault-Manager chart is
+included within the Vault application tarball in the stx-vault-helm
+package.

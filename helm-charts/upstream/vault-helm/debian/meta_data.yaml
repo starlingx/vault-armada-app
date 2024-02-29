@@ -9,10 +9,10 @@ src_files:
   - vault-helm/files/Makefile
   - vault-helm/helm-charts/_helpers-CA.tpl
   - vault-helm/helm-charts/vault-certificates.yaml
-  - vault-helm/helm-charts/vault-init.yaml
 revision:
   dist: $STX_DIST
+  stx_patch: 1
   PKG_GITREVCOUNT: true
   GITREVCOUNT:
-    SRC_DIR: ${MY_REPO}/stx/vault-armada-app/vault-helm
+    SRC_DIR: ${MY_REPO}/stx/vault-armada-app/helm-charts/upstream/vault-helm
     BASE_SRCREV: ccdb17d29610247eebf45e862ff9f30ff18432eb
