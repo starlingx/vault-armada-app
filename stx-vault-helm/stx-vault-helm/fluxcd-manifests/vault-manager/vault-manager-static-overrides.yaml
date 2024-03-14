@@ -16,3 +16,5 @@ manager:
       operator: "Exists"
       effect: "NoSchedule"
   unsealWaitIntervals: 0
+  imagePullSecrets:
+    - name: default-registry-key

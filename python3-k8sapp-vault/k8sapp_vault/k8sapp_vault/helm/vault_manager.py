@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2020-2023 Wind River Systems, Inc.
+# Copyright (c) 2024 Wind River Systems, Inc.
 #
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -23,8 +23,8 @@ import yaml
 LOG = logging.getLogger(__name__)
 
 
-class VaultHelm(base.FluxCDBaseHelm):
-    """Class to encapsulate helm operations for the vault chart"""
+class VaultManagerHelm(base.FluxCDBaseHelm):
+    """Class to encapsulate helm operations for the vault manager chart"""
 
     SUPPORTED_NAMESPACES = base.BaseHelm.SUPPORTED_NAMESPACES + \
         [common.HELM_NS_VAULT]
@@ -38,8 +38,8 @@ class VaultHelm(base.FluxCDBaseHelm):
     DEFAULT_AFFINITY = 'platform'
     LABEL_PARAMETER = 'extraLabels'
 
-    CHART = app_constants.HELM_CHART_VAULT
-    HELM_RELEASE = app_constants.HELM_RELEASE_VAULT
+    CHART = app_constants.HELM_CHART_VAULT_MANAGER
+    HELM_RELEASE = app_constants.HELM_RELEASE_VAULT_MANAGER
 
     def get_namespaces(self):
         """Return the list of supported namespaces"""
@@ -66,7 +66,7 @@ class VaultHelm(base.FluxCDBaseHelm):
         new_chart_overrides = self._get_helm_overrides(
             dbapi_instance,
             db_app,
-            app_constants.HELM_CHART_VAULT,
+            app_constants.HELM_CHART_VAULT_MANAGER,
             app_constants.HELM_CHART_NS_VAULT,
             'user_overrides')
 
@@ -86,12 +86,9 @@ class VaultHelm(base.FluxCDBaseHelm):
                 app_constants.HELM_VAULT_SERVER_POD: {
                     'ha': {
                         'replicas': ha_replicas,
-                    },
-                    self.LABEL_PARAMETER: {
-                        app_constants.HELM_CHART_COMPONENT_LABEL: affinity
                     }
                 },
-                app_constants.HELM_VAULT_INJECTOR_POD: {
+                app_constants.HELM_VAULT_MANAGER_POD: {
                     self.LABEL_PARAMETER: {
                         app_constants.HELM_CHART_COMPONENT_LABEL: affinity
                     }
