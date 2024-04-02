@@ -12,6 +12,7 @@ from oslo_log import log as logging
 
 from sysinv.common import constants
 from sysinv.common import exception
+from sysinv.common import kubernetes
 
 from sysinv.helm import base
 from sysinv.helm import common
@@ -70,6 +71,34 @@ class VaultHelm(base.FluxCDBaseHelm):
             app_constants.HELM_CHART_NS_VAULT,
             'user_overrides')
 
+        k8s_version = ""
+
+        try:
+            kube = kubernetes.KubeOperator()
+            k8s_version = kube.kube_get_kubernetes_version()
+        except exception.KubeNotConfigured:
+            # Do not check for psp override if kubernetes is not configured yet
+            pass
+
+        if (k8s_version >= "v1.25.1"
+                and new_chart_overrides
+                and "global" in new_chart_overrides.keys()
+                and "psp" in new_chart_overrides["global"].keys()
+                and "enable" in new_chart_overrides["global"]["psp"].keys()
+                and new_chart_overrides["global"]["psp"]["enable"] is True):
+            LOG.info("PSP must be disabled for kubernetes version 1.25 and onwards, "
+                        "as the feature is depreciated. User helm override will be changed "
+                        "so that global.psp.enabled is false")
+            new_chart_overrides["global"]["psp"]["enable"] = False
+            self._update_helm_overrides(
+                dbapi_instance,
+                db_app,
+                app_constants.HELM_CHART_VAULT,
+                app_constants.HELM_CHART_NS_VAULT,
+                'user_overrides',
+                new_chart_overrides
+            )
+
         user_chosen_affinity = new_chart_overrides.get(
             app_constants.HELM_CHART_COMPONENT_LABEL) \
             if new_chart_overrides else None
@@ -123,3 +152,15 @@ class VaultHelm(base.FluxCDBaseHelm):
         except exception.HelmOverrideNotFound:
             LOG.debug("Overrides for this chart not found, nothing to be done.")
         return helm_overrides
+
+    @staticmethod
+    def _update_helm_overrides(dbapi_instance, app, chart, namespace,
+                            type_of_overrides, value):
+        """Helper function for updating helm overrides to db."""
+        helm_overrides = {type_of_overrides: yaml.safe_dump(value)}
+        dbapi_instance.helm_override_update(
+            app_id=app.id,
+            name=chart,
+            namespace=namespace,
+            values=helm_overrides
+        )
