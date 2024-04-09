@@ -3204,6 +3204,226 @@ data:
         rekeyRecovery
     }
 
+    # Return 0 (true) if either the vault server status shows a rekey
+    # is in progress, or if vault-manager is engaged in the process of
+    # rekeying the vault
+    #
+    # Vault manager rekey is in progress if either of these secrets
+    # exists:
+    # cluster-rekey-request - the first to be created
+    # cluster-rekey-audit   - the last to be removed
+    function rekeyInProgress {
+        # query the vault server
+        assertNoRekey
+        if [ $? -ne 0 ]; then
+            return 0
+        fi
+
+        # look for vault-manager's milestone secrets
+        secretsExistAny cluster-rekey-request cluster-rekey-audit
+        return $?
+    }
+
+    # Check conditions that need to be met before taking a snapshot of
+    # the vault.  The same conditions apply for snapshot restore.
+    #
+    # The required conditions are:
+    #  - vault server pods matches HA_REPLICAS
+    #  - vault server pods are unsealed
+    #  - there is no rekey in progress
+    #
+    # Returns 0 for success, or >0 for conditions not met
+    # The fail conditions are logged to stdout/stderr
+    function snapshotPreCheck {
+        local errors=0
+        local pods
+        local podcount
+        local host
+        local dnsname
+        local server_status
+        local sealed
+
+        pods="$( getVaultPods | grep "^$VAULT_FN" )"
+        podcount="$( echo "$pods" | awk '{print $1}' | wc -w )"
+
+        if [ "$podcount" -ne "$HA_REPLICAS" ]; then
+            log $ERROR "snapshotPreCheck: vault pods ($podcount)" \
+                "does not match replicas ($HA_REPLICAS)"
+            errors=$(( errors + 1 ))
+        fi
+
+        while read host dnsname; do
+            NO_HEADER=true \
+            API_TMOUT=$QUERY_TMOUT \
+            vaultAPI server_status GET $dnsname.$POD_TARGET_BASE \
+                /sys/health
+            sealed="$( echo "$server_status" | jq .sealed )"
+            if [ "$sealed" != "false" ]; then
+                log $ERROR "snapshotPreCheck: $host ($dnsname)" \
+                    "sealed status is [$sealed]"
+                errors=$(( errors + 1 ))
+            else
+                log $DEBUG "snapshotPreCheck: $host ($dnsname)" \
+                    "sealed status is [$sealed]"
+            fi
+        done <<<"$pods"
+
+        if rekeyInProgress; then
+            log $ERROR "snapshotPreCheck: a rekey is in progress"
+            errors=$(( errors + 1 ))
+        fi
+
+        return $errors
+    }
+
+    # Take a snapshot of the vault, which is output to stdout
+    function snapshotCreate {
+        local apipath=/sys/storage/raft/snapshot
+
+        curl -s -S --cacert "$CERT" \
+            --connect-timeout $QUERY_TMOUT \
+            --header "X-Vault-Token:$( get_secret cluster-key-root )" \
+            --request "GET" \
+            "https://$ACTIVE_TARGET:${TARGET_PORT}/v1${apipath}"
+    }
+
+    # Store the init response and metadata associated with a vault
+    # snapshot into the specified k8s secret.
+    #
+    # metadata should be a dictionary type structure in this form:
+    #   {"date":"xxx","snapshot_sum":"yyy","secret":"zzz"}
+    #
+    # The 'snapshot' of the init response should be taken promptly with
+    # the snapshot of the vault.  Especially, consider pausing vault
+    # manager, in addition to using snapshotPreCheck, to ensure the
+    # two are consistent.
+    #
+    # In practice the metadata can contain any information; the
+    # procedure only requires the value of 'secret', as in:
+    #    echo "$metadata" | jq -r .secret
+    function snapshotSetSecret {
+        local secret="$1"
+        local metadata="$2"
+        local jqlog
+        local result
+        local keys
+        local data
+
+        # make sure the user supplied data is ok
+        jqlog="$( echo "$metadata" | jq . 2>&1 >/dev/null )"
+        result=$?
+        if [ $result -ne 0 ]; then
+            log $ERROR "snapshotSetSecret: error parsing metadata:" \
+                "[$result] [$jqlog]"
+            return 1
+        fi
+
+        # check that the user supplied metadata contains 'secret',
+        # which is the only value the procedure requires.
+        jqlog="$( echo "$metadata" | jq -r .secret 2>&1 )"
+        if [ $? -ne 0 -o -z "$jqlog" -o "$jqlog" == "null" ]; then
+            log $WARNING "snapshotSetSecret: metadata omits 'secret'"
+        fi
+
+        keys="$( reconstructInitResponse cluster-key )"
+        data="{\"metadata\":$metadata,\"init\":$keys}"
+
+        # make sure the assembled secret data is ok
+        echo "$data" | jq . >/dev/null 2>&1
+        result=$?
+        if [ $result -ne 0 ]; then
+            log $ERROR "snapshotSetSecret: error parsing secret data:" \
+                "[$result]"
+            return 1
+        fi
+
+        echo "$data" | jq -c . | set_secret "$secret" /dev/stdin
+
+        # verify the copy of shards secrets
+        get_secret "$secret" | jq -c .init | validateSecrets cluster-key
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+
+        return 0
+    }
+
+    # POST stdin to the active vault server API endpoint for restoring
+    # the snapshot.  stdin is the snapshot file of the vault cluster.
+    #
+    # The required parameter is the metadata associated with the
+    # snapshot, which contains the name of the k8s secret which has
+    # the unseal shards for the vault data being restored.  The metadata
+    # needs to contain at least '{"secret":"xxx"}', and this secret
+    # needs to exist in the vault namespace.
+    #
+    # The content of the secret will be used to restore the unseal
+    # shards for the vault that is being restored.
+    function snapshotRestore {
+        local metadata="$1"
+        local secret
+        local logs
+        local result
+        local initdata
+        local apipath="/sys/storage/raft/snapshot-force"
+
+        # check that the associated secret exists
+        secret="$( echo "$metadata" | jq -r .secret 2>/dev/null )"
+        if [ -z "$secret" -o "$secret" == "null" ]; then
+            log $ERROR "Metadata omits the k8s secret associated with" \
+                "the snapshot"
+            return 1
+        fi
+
+        secretExists "$secret" >/dev/null
+        if [ $? -ne 0 ]; then
+            log $ERROR "K8s secret [$secret] associated with the" \
+                "snapshot does not exist"
+            return 1
+        fi
+
+        # check the init response associated with the snapshot
+        initdata="$( get_secret "$secret" | jq -c .init 2>/dev/null )"
+        if [ -z "$initdata" -o "$initdata" == 'null' ]; then
+            log $ERROR "Failed to retrieve init response from" \
+                "k8s secret [$secret]"
+            return 1
+        fi
+
+        # The snapshot API success does not give a response.  On vault
+        # API error the return code is also 0.  If there is a log, then
+        # there was an error.
+        logs="$( curl -s -S --cacert "$CERT" \
+            --connect-timeout $QUERY_TMOUT \
+            --header "X-Vault-Token:$( get_secret cluster-key-root )" \
+            --request POST \
+            --data-binary @/dev/stdin \
+            "https://$ACTIVE_TARGET:${TARGET_PORT}/v1${apipath}" 2>&1 )"
+
+        result=$?
+        log $INFO "Snapshot restore API response: $result"
+        if [ "$result" -ne 0 -o -n "$logs" ]; then
+            log $ERROR "Snapshot restore: [$logs]"
+            return 1
+        fi
+
+        # Restore the secrets associated with the snapshot
+        # We're done if the secrets haven't changed.
+        echo "$initdata" | validateSecrets cluster-key
+        if [ $? -eq 0 ]; then
+            return 0
+        fi
+
+        # replace vault's init response in k8s secrets
+        deleteShardSecrets cluster-key
+        deleteSecrets cluster-key-root
+        echo "$initdata" | storeVaultInitSecrets cluster-key
+
+        # finally, verify the storage was successful
+        echo "$initdata" | validateSecrets cluster-key
+        return $?
+    }
+
 
     #
     # LOGIC
