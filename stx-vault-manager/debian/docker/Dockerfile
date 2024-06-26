@@ -1,4 +1,4 @@
-from debian:stable-slim
+FROM debian:stable-slim
 
 # Support versions of kubernetes back two releases of starlingx
 # Versions older than 1.26 can be listed from:
@@ -6,8 +6,8 @@ from debian:stable-slim
 # Otherwise the latest minor releases are listed here:
 # https://kubernetes.io/releases/
 
-ENV KUBE_LATEST_VERSION="v1.28.6"
-ENV KUBE_VERSIONS="v1.28.6 v1.27.10 v1.26.13 v1.25.16 v1.24.17"
+ENV KUBE_LATEST_VERSION="v1.29.6"
+ENV KUBE_VERSIONS="v1.29.6 v1.28.11 v1.27.15 v1.26.15 v1.25.16 v1.24.17"
 ENV KUBECTL_DL_URL="https://storage.googleapis.com/kubernetes-release/release/${KUBE_LATEST_VERSION}/bin/linux/amd64/kubectl"
 ENV KUBECTL_INSTALL_PATH="/usr/local/bin"
 
