@@ -123,3 +123,54 @@ manager:
   #   FATAL: 5
   log:
     defaultLogLevel: 2
+
+  # All options related to vault manager healthcheck funtion
+  healthcheck:
+    # Disables the healthcheck function. It will always return as "healthy"
+    # When this is set to true
+    disableHC: false
+
+    # Enables the network excuse of the healthcheck function. When enabled,
+    # healthcheck function will always return as "healthy" when vault manager
+    # is accessing vault REST API
+    enableNetwork: true
+
+    # Enables the initialization excuse of the healthcheck funtion. When
+    # enabled, healthcheck function will always return as "healthy" when vault
+    # manager is initializing
+    enableInit: true
+
+    # Enables the pause excuse of the healthcheck function. when enabled,
+    # healthcheck function will always return as "healthy" when vault manager
+    # is paused during exit_on_trap by the pause option.
+    enablePause: true
+
+    # Maximum threshold in seconds, between the last heartbeat and healthcheck.
+    # If the time passed between the last heartbeat and the latest healthcheck
+    # passes the threshold value, then the healthcheck will fail if no excuses
+    # were found.
+    heartbeatThreshold: 30
+
+  # All options related to vault manager liveness probe. Consult the kubernetes
+  # documentation to find more details on each options.
+  livenessProbe:
+
+    # Number of seconds before the first probe is initiated
+    initialDelaySeconds: 0
+
+    # Number of seconds between each probe
+    periodSeconds: 10
+
+    # Number of seconds before the probe times out
+    timeoutSeconds: 1
+
+    # Number of successful probes required for the pod to be considered
+    # successful.
+    successThreshold: 1
+
+    # Number of failed probes required for the pod to be considered failed
+    failureThreshold: 3
+
+    # Number of seconds to wait from triggering the shutdown on the container,
+    # and the forced stop of the container by the container runtime.
+    terminationGracePeriodSeconds: 30
