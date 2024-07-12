@@ -1,14 +1,14 @@
 From 9976bbbd382adeb321cc29c642781b3df55a72ac Mon Sep 17 00:00:00 2001
 From: Sabyasachi Nayak <sabyasachi.nayak@windriver.com>
 Date: Fri, 5 Jan 2024 04:01:02 -0500
-Subject: [PATCH] Add yaml for starlingx image handling
+Subject: [PATCH] Add yaml for Starlingx image handling
 
-Add values yaml compatible with starlingx platform's image pull and
+Add values yaml compatible with Starlingx platform's image pull and
 service parameter registry override handling.  The platform will pull
 the image and populate registry.local, and the vault injector agent will
 pull from registry.local.
 
-Signed-off-by: Sabyasachi Nayak <sabyasachi.nayak@windriver.com>
+Signed-off-by: Michel Thebeau <Michel.Thebeau@windriver.com>
 ---
  values.yaml | 3 +++
  1 file changed, 3 insertions(+)
@@ -23,7 +23,7 @@ index 58eb8a2..a0c69c7 100644
    agentImage:
 +    image:
 +      repository: "hashicorp/vault"
-+      tag: "1.14.8"
++      tag: "1.14.0"
      repository: "hashicorp/vault"
      tag: "1.14.0"
  

@@ -1,3 +1,8 @@
+stx-vault-helm (1.0-2) unstable; urgency=medium
+
+  * Update vault to 1.14.0, chart to 0.25.0
+
+ --  Michel Thebeau <Michel.Thebeau@windriver.com>  Fri, 12 Jul 2024 14:51:00 +0000
 stx-vault-helm (1.0-1) unstable; urgency=medium
 
   * Initial release.

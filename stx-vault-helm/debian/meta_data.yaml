@@ -1,6 +1,6 @@
 ---
 debname: stx-vault-helm
-debver: 1.0-1
+debver: 1.0-2
 src_path: stx-vault-helm
 revision:
   dist: $STX_DIST
