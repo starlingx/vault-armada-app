@@ -44,10 +44,13 @@ data:
     # reserve trap '0' for disabling a debugging trap request
     DEBUGGING_TRAP=0
 
-    # Pause notification file. A debugging option to permit
-    # vault-manager to be paused at any of the exit_on_trap code points.
-    # Use case may include permitting time for a developer to setup
-    # conditions for debug and test.
+    # Pause notification file. An option to permit vault-manager to be
+    # paused at any of the exit_on_trap code points.  The use cases may
+    # include:
+    #   - running an external procedure that should not be permitted to
+    #     conflict with vault-manager's operation
+    #   - permitting time for a developer to setup conditions for debug
+    #   - and test
     PAUSEFILE=$WORKDIR/pause_on_trap
     PAUSE_RATE=1  # rate at which to test for unpause
     EARLY_PAUSE={{ .Values.manager.pause }}

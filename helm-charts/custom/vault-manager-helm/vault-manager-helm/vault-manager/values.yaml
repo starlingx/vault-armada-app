@@ -108,10 +108,12 @@ manager:
     # the conversion of storage from PVC to kubernetes secrets.
     sleepTime: 5
 
-  # Debugging option to setup pause request for vault manager on startup
-  # A pause_on_trap file will be created with the content of this value
-  # Values may include a positive integer matching a call of
-  # exit_on_trap
+  # Request vault-manager to pause on startup.
+  #
+  # The pause feature allows execution of vault-manager to be suspended
+  # for external operations or for debugging. A pause_on_trap file will
+  # be created with the content of this value. Values may include a
+  # positive integer matching a call of exit_on_trap
   #
   # pause: 1
 
