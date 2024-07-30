@@ -25,7 +25,11 @@ data:
 
     # impermanent location to store files while running
     WORKDIR=/workdir
-    mkdir -p $WORKDIR
+
+    # Health subdirectory. All vault manager health related files
+    # Will be placed here.
+    HEALTH_SUBDIR=$WORKDIR/health
+    mkdir -p $HEALTH_SUBDIR
 
     # Selection of kubectl version from helm override
     KUBECTL=kubectl
@@ -47,6 +51,28 @@ data:
     PAUSEFILE=$WORKDIR/pause_on_trap
     PAUSE_RATE=1  # rate at which to test for unpause
     EARLY_PAUSE={{ .Values.manager.pause }}
+
+    # Healthcheck Fail file. If this file exists then we have decided to
+    # force vault manager to fail the health check
+    HEALTH_CHECK_FAIL=$HEALTH_SUBDIR/health_check_fail
+
+    # Healthcheck excuses.
+    HEALTH_CHECK_DISABLED=$HEALTH_SUBDIR/health_check_disabled
+    HEALTH_EXCUSE_NETWORK=$HEALTH_SUBDIR/health_excuse_network
+    HEALTH_EXCUSE_INIT=$HEALTH_SUBDIR/health_excuse_init
+    HEALTH_EXCUSE_PAUSE=$HEALTH_SUBDIR/health_excuse_pause
+
+    # Healthcheck excuse messages.
+    HC_MSG_DISABLED="Healthcheck is disabled."
+    HC_MSG_NETWORK="Vault manager has initiated a network operation."
+    HC_MSG_INIT="Vault manager is currently initializing."
+    HC_MSG_PAUSE="Vault manager is paused for external operation."
+
+    # Enable healthcheck excuses.
+    HC_DISABLE={{ .Values.manager.healthcheck.disableHC }}
+    HC_ENABLE_NETWORK={{ .Values.manager.healthcheck.enableNetwork }}
+    HC_ENABLE_INIT={{ .Values.manager.healthcheck.enableInit }}
+    HC_ENABLE_PAUSE={{ .Values.manager.healthcheck.enablePause }}
 
     # set the default manager mode; modes include
     #   VAULT_MANAGER (default)
@@ -121,7 +147,8 @@ data:
     UNSEAL_RATE=10
     UNSEAL_CONVERGE_TIME=3
     STATUS_RATE={{ .Values.manager.statusCheckRate }}
-    if [ -z "$STATUS_RATE" ]; then
+    if [ -z "$STATUS_RATE" ] || [ -n "${STATUS_RATE//[0-9]}" ] || \
+        [ $STATUS_RATE -lt 1 ]; then
         STATUS_RATE=5
     fi
 
@@ -131,6 +158,13 @@ data:
     if [ -z "$STATEMACH_START" ]; then
         STATEMACH_START=3
     fi
+
+    # Heartbeat file location
+    HB_FILE=$HEALTH_SUBDIR/heartbeat
+
+    # Maximum threshold time in seconds that is allowed between
+    # a heartbeat call and health_check call.
+    HB_THRESHOLD={{ .Values.manager.healthcheck.heartbeatThreshold }}
 
     # Log levels
     DEBUG=1
@@ -371,6 +405,112 @@ data:
         QUERY_TMOUT=""
     fi
 
+    # Check the current health status for the vault manager.
+    # Return 0 if vault manager is healthy
+    # Return 1 if vault manager is unhealthy
+    function health_check {
+        local excuse_reason=()
+        local current_timestamp=0
+        local heartbeat_timestamp=0
+        local heartbeat_passed=false
+        local heartbeat_age=0
+
+        current_timestamp="$( date +%s )"
+        heartbeat_timestamp="$( stat -c %X $HB_FILE )"
+        heartbeat_age=$(( current_timestamp - heartbeat_timestamp ))
+        if [ $heartbeat_age -gt $HB_THRESHOLD ]; then
+            log $DEBUG "Heartbeat check failed"
+            heartbeat_passed=false
+        else
+            heartbeat_passed=true
+        fi
+
+        log $DEBUG "heartbeat time: $heartbeat_age"
+
+        if $heartbeat_passed && [ ! -f $HEALTH_CHECK_FAIL ]; then
+            return 0
+        else
+            if [ "$HC_DISABLE" = "true" ] || [ -f $HEALTH_CHECK_DISABLED ]; then
+                excuse_reason+=("$HC_MSG_DISABLED")
+            elif [ "$HC_ENABLE_PAUSE" = "true" ] && [ -f $HEALTH_EXCUSE_PAUSE ]; then
+                excuse_reason+=("$( cat $HEALTH_EXCUSE_PAUSE )")
+            elif [ "$HC_ENABLE_NETWORK" = "true" ] && [ -f $HEALTH_EXCUSE_NETWORK ]; then
+                excuse_reason+=("$( cat $HEALTH_EXCUSE_NETWORK )")
+            elif [ "$HC_ENABLE_INIT" = "true" ] && [ -f $HEALTH_EXCUSE_INIT ]; then
+                excuse_reason+=("$( cat $HEALTH_EXCUSE_INIT )")
+            fi
+
+            if [ ${#excuse_reason[@]} -gt 0 ]; then
+                log $INFO "Health_check fail has been excused. Reasons:"
+                for reason in "${excuse_reason[@]}"; do
+                    log $INFO "$reason"
+                done
+                return 0
+            else
+                log $INFO "Health_check has failed."
+                return 1
+            fi
+        fi
+    }
+
+    # Heartbeat function touches the heartbeat file to update the timestamp,
+    # and updates the current heartbeat timestamp
+    function heartbeat {
+
+        # Do nothing if mode is not VAULT_MANAGER
+        if [ "$MANAGER_MODE" != "VAULT_MANAGER" ]; then
+            return
+        fi
+
+        touch $HB_FILE
+    }
+
+    # Create a health excuse file and log the reason.
+    function health_excuse_create {
+        local excuse_file_name="$1"
+        local excuse_reason="$2"
+
+        # Do nothing if mode is not VAULT_MANAGER
+        if [ "$MANAGER_MODE" != "VAULT_MANAGER" ]; then
+            return
+        fi
+
+        heartbeat
+
+        # check if the requested excuse file already exists.
+        # If not, create the excuse file and log the message
+        if [ -f $excuse_file_name ]; then
+            log $DEBUG "The excuse file $excuse_file_name already exists."
+        else
+            echo $excuse_reason > $excuse_file_name
+            log $DEBUG "The excuse file $excuse_file_name created." \
+                "Excuse reason: $excuse_reason"
+        fi
+    }
+
+    # Remove the named health excuse files.
+    function health_excuse_remove {
+        local excuse_file_name="$1"
+        local excuse_reason
+
+        # Do nothing if mode is not VAULT_MANAGER
+        if [ "$MANAGER_MODE" != "VAULT_MANAGER" ]; then
+            return
+        fi
+
+        heartbeat
+
+        # Check if the named excuse exists, if it is delete the file
+        if [ -f $excuse_file_name ]; then
+            excuse_reason="$( cat $excuse_file_name )"
+            rm $excuse_file_name
+            log $DEBUG "The excuse file $excuse_file_name is deleted. " \
+                "The excuse reason was: $excuse_reason"
+        else
+            log $DEBUG "The excuse file $excuse_file_name is already deleted."
+        fi
+    }
+
     function pause_on_trap {
         local thistrap="$1"
         local pausenum
@@ -388,6 +528,7 @@ data:
         fi
 
         log $INFO "Vault manager is paused ($thistrap)"
+        health_excuse_create "$HEALTH_EXCUSE_PAUSE" "$HC_MSG_PAUSE"
         # Until pause file is removed by the author,
         # or until the content of pause_on_trap file is
         # not-empty and not matching the current trap.
@@ -402,6 +543,7 @@ data:
             fi
             sleep "$PAUSE_RATE"
         done
+        health_excuse_remove "$HEALTH_EXCUSE_PAUSE"
         log $INFO "Vault manager is unpaused"
     }
 
@@ -414,6 +556,8 @@ data:
             # vault-manager pod
             return
         fi
+
+        heartbeat
 
         # Debug option pause_on_trap
         pause_on_trap "$trap"
@@ -727,6 +871,7 @@ data:
             ${data:+"--data" "xxxx"} \
             "\"https://${server}:${TARGET_PORT}/v1${apipath}\"]"
 
+        health_excuse_create "$HEALTH_EXCUSE_NETWORK" "$HC_MSG_NETWORK"
         # Capture stderr and stdout copied from google search example
         # on stack overflow.  Add capture of the command result code
         {
@@ -743,6 +888,8 @@ data:
                 "https://${server}:${TARGET_PORT}/v1${apipath}"
             echo "$?"
         )" 1>&2) 2>&1)
+
+        health_excuse_remove "$HEALTH_EXCUSE_NETWORK"
 
         if [ "$cmdres" -ne 0 ]; then
             log $ERROR "curl returns non-zero result: $cmdres"
@@ -3424,6 +3571,17 @@ data:
         return $?
     }
 
+    # function that calls exit_on_trap for every second of sleep
+    # takes total sleep time as parameter
+    function trap_sleep {
+        local sleep_time="$1"
+
+        for i in $(seq 1 $sleep_time); do
+            sleep 1
+            exit_on_trap 22
+        done
+    }
+
 
     #
     # LOGIC
@@ -3433,6 +3591,7 @@ data:
         return 0
     fi
 
+    health_excuse_create "$HEALTH_EXCUSE_INIT" "$HC_MSG_INIT"
     if [ -n "$EARLY_PAUSE" ]; then
         echo -n "$EARLY_PAUSE" > $PAUSEFILE
     fi
@@ -3532,12 +3691,14 @@ data:
         echo "$status_rec" >> "$PODREC_F"
     done <$WORKDIR/pods.txt
 
+    health_excuse_remove "$HEALTH_EXCUSE_INIT"
+
     # Loop forever to check the seal status of vaults and
     # unseal if required
     log $INFO "Checking vault pods seal status in perpetuity..."
     while true; do
         exit_on_trap 10
-        sleep "$STATUS_RATE"
+        trap_sleep "$STATUS_RATE"
         exit_on_trap 20
         pickK8sVersion # check if the k8s server version is changed
 
@@ -3751,6 +3912,18 @@ spec:
           env:
           - name: CA_CERT
             value: /mnt/data/ca/tls.crt
+          livenessProbe:
+            exec:
+              command:
+              - bash
+              - -c
+              - "source /opt/script/init.sh; health_check"
+            initialDelaySeconds: {{ .Values.manager.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.manager.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.manager.livenessProbe.timeoutSeconds }}
+            successThreshold: {{ .Values.manager.livenessProbe.successThreshold }}
+            failureThreshold: {{ .Values.manager.livenessProbe.failureThreshold }}
+            terminationGracePeriodSeconds: {{ .Values.manager.livenessProbe.terminationGracePeriodSeconds }}
           volumeMounts:
             - name: vault-init-unseal-3
               mountPath: /opt/script
