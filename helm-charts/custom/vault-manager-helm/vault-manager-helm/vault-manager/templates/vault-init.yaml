@@ -3796,6 +3796,9 @@ data:
           tolerations:
             {{- tpl .Values.manager.tolerations . | nindent 12 }}
           {{- end }}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
           containers:
             - name: mount
               image: "{{ .Values.manager.image.repository }}:{{ .Values.manager.image.tag }}"
