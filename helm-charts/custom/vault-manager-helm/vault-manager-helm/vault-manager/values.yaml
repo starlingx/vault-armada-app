@@ -11,6 +11,7 @@ vault:
   fullname: sva-vault
 
 server:
+  version: 1.14.0
   ha:
     replicas: 1
 

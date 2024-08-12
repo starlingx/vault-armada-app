@@ -13,6 +13,7 @@ data:
     VAULT_NAME={{ .Values.vault.name }}
     VAULT_FN={{ .Values.vault.fullname }}
     HA_REPLICAS={{ .Values.server.ha.replicas }}
+    VAULT_VERSION={{ .Values.server.version }}
 
     # Set the domain for resolving pod names
     DOMAIN="${VAULT_NS}.pod.cluster.local"
@@ -1993,6 +1994,40 @@ data:
         return 0
     }
 
+    # Check the vault server pods' metadata label "vault-version",
+    # and assert that all servers are running the expected version
+    # which is coded in vault-manager values.yaml server.version
+    function allServersCurrent {
+        local jdata
+        local podcount
+        local i
+        local poddata
+        local name
+        local version
+
+        jdata="$( kubectl get pods -n "$VAULT_NS" -o json )"
+        podcount="$( echo "$jdata" | jq ".items | length" )"
+
+        for i in $( seq 0 $((podcount -1 )) ); do
+            poddata="$( echo "$jdata" | jq ".items[$i]" )"
+            name="$( echo "$poddata" | jq -r ".metadata.name" )"
+            if ! [[ "$name" =~ ^${VAULT_FN}-[0-9]$ ]]; then
+                # this is not a vault server pod
+                continue
+            fi
+
+            version="$( echo "$poddata" \
+                | jq -r '.metadata.labels["vault-version"]' )"
+            if [ "$version" != "$VAULT_VERSION" ]; then
+                log $INFO "Vault server pod $name is version $version"
+                return 1
+            fi
+
+            log $DEBUG "Vault server pod $name is version $version"
+        done
+        return 0
+    }
+
     # Test the status of rekey procedure 'started' during pre-rekey
     # tests for procedure progress selection (sharing a single vaultAPI
     # call to GET /sys/rekey/init
@@ -2094,6 +2129,7 @@ data:
         local pods
         local sealed
         local response
+        local apiversion
 
         # the first milestone to be created is cluster-rekey-request;
         # the last milestone to be deleted is cluster-rekey-audit;
@@ -2131,7 +2167,15 @@ data:
             return 1
         fi
 
-        # The above three tests are based on output of kubectl get pods
+        # progress a rekey if all server pods are running the expected
+        # server version
+        if ! allServersCurrent; then
+            log $INFO "Rekey: wait for vault servers to be updated" \
+                "to the current version $VAULT_VERSION"
+            return 1
+        fi
+
+        # The above four tests are based on output of kubectl get pods
         # command. Doublecheck with REST API call to each server
         pods="$( getVaultPods | grep "^$VAULT_FN" | awk '{print $2}' )"
         for pod in $pods; do
@@ -2145,6 +2189,11 @@ data:
             sealed="$( echo "$response" | jq -r '.sealed' )"
             if [ "$sealed" != "false" ]; then
                 log $ERROR "$pod is sealed during rekey"
+                return 1
+            fi
+            apiversion="$( echo "$response" | jq -r '.version' )"
+            if [ "$apiversion" != "$VAULT_VERSION" ]; then
+                log $ERROR "$pod is not version $VAULT_VERSION"
                 return 1
             fi
         done
