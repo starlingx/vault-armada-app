@@ -38,6 +38,10 @@ injector:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+  livenessProbe:
+    initialDelaySeconds: 11
+    periodSeconds: 11
+    timeoutSeconds: 7
 server:
   affinity: |
     podAntiAffinity:

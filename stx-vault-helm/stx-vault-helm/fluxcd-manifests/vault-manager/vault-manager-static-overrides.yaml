@@ -18,3 +18,7 @@ manager:
   unsealWaitIntervals: 0
   imagePullSecrets:
     - name: default-registry-key
+  livenessProbe:
+    initialDelaySeconds: 31
+    periodSeconds: 23
+    timeoutSeconds: 13
