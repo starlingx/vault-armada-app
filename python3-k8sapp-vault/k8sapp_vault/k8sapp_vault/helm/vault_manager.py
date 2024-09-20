@@ -41,6 +41,13 @@ class VaultManagerHelm(base.FluxCDBaseHelm):
     CHART = app_constants.HELM_CHART_VAULT_MANAGER
     HELM_RELEASE = app_constants.HELM_RELEASE_VAULT_MANAGER
 
+    def execute_kustomize_updates(self, operator):
+        # On application load this chart is enabled. Only disable if
+        # specified by the user
+        if not self._is_enabled(operator.APP, self.CHART,
+                                common.HELM_NS_VAULT):
+            operator.helm_release_resource_delete(self.CHART)
+
     def get_namespaces(self):
         """Return the list of supported namespaces"""
         return self.SUPPORTED_NAMESPACES
