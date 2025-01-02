@@ -16,6 +16,7 @@ from sysinv.common import constants
 from sysinv.common import kubernetes
 from sysinv.common import utils as cutils
 from sysinv.helm import lifecycle_base as base
+from sysinv.helm.lifecycle_constants import LifecycleConstants
 import time
 
 LOG = logging.getLogger(__name__)
@@ -41,9 +42,9 @@ class VaultAppLifecycleOperator(base.AppLifecycleOperator):
         :param hook_info: LifecycleHookInfo object
 
         """
-        if (hook_info.lifecycle_type == constants.APP_LIFECYCLE_TYPE_RESOURCE
+        if (hook_info.lifecycle_type == LifecycleConstants.APP_LIFECYCLE_TYPE_RESOURCE
                 and hook_info.operation == constants.APP_APPLY_OP
-                and hook_info.relative_timing == constants.APP_LIFECYCLE_TIMING_PRE):
+                and hook_info.relative_timing == LifecycleConstants.APP_LIFECYCLE_TIMING_PRE):
             try:
                 self.read_pvc_secret(app_op._kube._get_kubernetesclient_core())
             except Exception:  # nosec # pylint: disable=broad-exception-caught
