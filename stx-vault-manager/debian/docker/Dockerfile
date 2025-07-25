@@ -1,3 +1,36 @@
+# Build vault-monitor binary & completion script
+
+# The commit hash used as the reference openbao-monitor code to apply vault patch
+ARG BAOMON_COMMIT=a5c49d8e93f7413be8aef70583abcfa71a561cf6
+
+FROM golang:1.24.3-bullseye AS builder
+
+USER root
+
+WORKDIR /src
+
+# Copy in the patch
+COPY 0001-Patch-baomon-into-vaultmon.patch /src
+
+# Checkout & extract the openbao-monitor code. Patch in the conversion to vault
+RUN git clone https://opendev.org/starlingx/utilities.git \
+    && cd utilities \
+    && git checkout -b vaultmon-build ${BAOMON_COMMIT} \
+    && git apply --reject /src/0001-Patch-baomon-into-vaultmon.patch \
+    && cd - \
+    && mv utilities/security/openbao-monitor/source/* /src \
+    && rm -r utilities
+
+# build the binary
+RUN go mod download
+
+RUN go mod tidy
+
+RUN go build -o /out/vaultmon .
+
+# create auto-completion file
+RUN /out/vaultmon completion bash > /out/vaultmon.completion
+
 FROM debian:stable-slim
 
 USER root
@@ -15,7 +48,7 @@ ENV KUBECTL_INSTALL_PATH="/usr/local/bin"
 
 # install vault-manager's required packages
 RUN set -ex; \
-    PKG_LIST="mawk bash coreutils curl grep sed jq uuid-runtime"; \
+    PKG_LIST="mawk bash coreutils curl grep sed jq uuid-runtime bash-completion"; \
     apt-get update && apt-get install -y $PKG_LIST \
     && apt-get clean && rm -r /var/lib/apt/lists/*
 
@@ -33,6 +66,10 @@ RUN set -ex; \
 RUN set -ex; \
     ln -s ${KUBECTL_INSTALL_PATH}/kubectl.${KUBE_LATEST_VERSION%.*} \
         ${KUBECTL_INSTALL_PATH}/kubectl
+
+# Copy over the vaultmon and the completion script
+COPY --from=builder /out/vaultmon /usr/bin
+COPY --from=builder /out/vaultmon.completion /usr/share/bash-completion/completions/vaultmon
 
 # create a non-root user/group for vault-manager
 RUN groupadd --gid 1000 manager \
