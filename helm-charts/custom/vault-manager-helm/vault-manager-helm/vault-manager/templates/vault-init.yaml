@@ -3898,21 +3898,6 @@ rules:
   verbs: ["list", "delete"]
 ---
 apiVersion: v1
-data:
-  vaultmonConfig.yaml: |
-    CACert: "/mnt/data/ca/tls.crt"
-    ClientCert: ""
-    ClientKey: ""
-    logPath: ""
-    logLevel: "INFO"
-    WaitInterval: {{ .Values.manager.statusCheckRate }}
-    Timeout: {{ .Values.manager.healthQueryTimeout }}
-kind: ConfigMap
-metadata:
-  name: vaultmonConfig
-  namespace: {{ .Release.Namespace }}
----
-apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ .Values.vault.fullname }}-manager-1
@@ -4004,9 +3989,6 @@ spec:
             - name: vault-ca
               mountPath: /mnt/data/ca
               readOnly: true
-            - name: vaultmonConfig-vol
-              mountPath: /opt/yaml
-              readOnly: true
       volumes:
         - name: vault-init-unseal-3
           configMap:
@@ -4017,6 +3999,3 @@ spec:
         - name: vault-ca
           secret:
             secretName: vault-ca
-        - name: vaultmonConfig-vol
-          configMap:
-            name: vaultmonConfig
