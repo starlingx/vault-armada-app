@@ -1,0 +1,4 @@
+python3-k8sapp-vault
+stx-vault-helm
+helm-charts/upstream/vault-helm
+helm-charts/custom/vault-manager-helm
