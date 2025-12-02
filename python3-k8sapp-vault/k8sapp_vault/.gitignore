@@ -10,6 +10,7 @@ doc/source/api/
 
 # Packages/installer info
 *.egg
+*.eggs
 *.egg-info
 dist
 build
