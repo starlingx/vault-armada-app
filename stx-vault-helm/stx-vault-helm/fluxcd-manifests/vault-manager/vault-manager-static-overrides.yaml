@@ -7,7 +7,7 @@
 manager:
   image:
     repository: starlingx/stx-vault-manager
-    tag: stx.10.0-v1.29.6-1
+    tag: stx.11.0-v1.32.6
   tolerations: |
     - key: "node-role.kubernetes.io/master"
       operator: "Exists"
