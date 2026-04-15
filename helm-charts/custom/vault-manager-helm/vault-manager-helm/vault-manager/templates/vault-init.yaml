@@ -620,12 +620,12 @@ data:
         mkfifo "$WORKDIR"/s2
 
         (
-        jq -Mn --argfile file1 $WORKDIR/s1 --argfile file2 $WORKDIR/s2 '
-            def mergek: ($file1, $file2) | .keys as $k | $k;
-            def mergeb: ($file1, $file2) | .keys_base64 as $b | $b;
-            {keys: (reduce mergek as $x ([]; . + $x)),
-            keys_base64: (reduce mergeb as $x ([]; . + $x))}
-        ' & ) 2>/dev/null
+        jq -s '{keys: map(.keys) |
+            add, keys_base64: map(.keys_base64) |
+            add}' \
+            "$WORKDIR"/s1 \
+            "$WORKDIR"/s2 \
+        & ) 2>/dev/null
 
         echo -n "${!jstr1}" > "$WORKDIR"/s1
         echo -n "${!jstr2}" > "$WORKDIR"/s2
