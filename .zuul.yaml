@@ -9,6 +9,8 @@
         - k8sapp-vault-tox-pylint
         - k8sapp-vault-tox-flake8
         - k8sapp-vault-tox-metadata
+        - k8sapp-vault-tox-coverage
+        - k8sapp-vault-tox-security
     gate:
       jobs:
         - openstack-tox-linters
@@ -16,6 +18,8 @@
         - k8sapp-vault-tox-pylint
         - k8sapp-vault-tox-flake8
         - k8sapp-vault-tox-metadata
+        - k8sapp-vault-tox-coverage
+        - k8sapp-vault-tox-security
     post:
       jobs:
         - stx-vault-armada-app-upload-git-mirror
@@ -88,6 +92,44 @@
       tox_envlist: flake8
       tox_extra_args: -c python3-k8sapp-vault/k8sapp_vault/tox.ini
       tox_constraints_file: '{{ ansible_user_dir }}/src/opendev.org/starlingx/root/build-tools/requirements/debian/upper-constraints.txt'
+
+- job:
+    name: k8sapp-vault-tox-coverage
+    parent: tox
+    description: |
+      Run coverage analysis for k8sapp_vault
+    nodeset: debian-bullseye
+    required-projects:
+      - starlingx/config
+      - starlingx/fault
+      - starlingx/utilities
+      - starlingx/root
+    files:
+      - python3-k8sapp-vault/*
+    vars:
+      tox_envlist: coverage
+      tox_config_file: python3-k8sapp-vault/k8sapp_vault/tox.ini
+      tox_constraints_file: '{{ ansible_user_dir }}/src/opendev.org/starlingx/root/build-tools/requirements/debian/upper-constraints.txt'
+    post-run: playbooks/upload-coverage-reports.yaml
+
+- job:
+    name: k8sapp-vault-tox-security
+    parent: tox
+    description: |
+      Run security analysis for k8sapp_vault
+    nodeset: debian-bullseye
+    required-projects:
+      - starlingx/config
+      - starlingx/fault
+      - starlingx/utilities
+      - starlingx/root
+    files:
+      - python3-k8sapp-vault/*
+    vars:
+      tox_envlist: security
+      tox_config_file: python3-k8sapp-vault/k8sapp_vault/tox.ini
+      tox_constraints_file: '{{ ansible_user_dir }}/src/opendev.org/starlingx/root/build-tools/requirements/debian/upper-constraints.txt'
+    post-run: playbooks/upload-security-reports.yaml
 
 - job:
     name: stx-vault-armada-app-upload-git-mirror
