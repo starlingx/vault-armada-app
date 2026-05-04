@@ -3796,28 +3796,12 @@ data:
     done
 kind: ConfigMap
 metadata:
-  managedFields:
-  - apiVersion: v1
-    fieldsType: FieldsV1
-    fieldsV1:
-      f:data:
-        .: {}
-        f:init.sh: {}
-    manager: vault-init-unseal
   name: vault-init-unseal-3
   namespace: {{ .Release.Namespace }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  managedFields:
-  - apiVersion: v1
-    fieldsType: FieldsV1
-    fieldsV1:
-      f:data:
-        .: {}
-        f:pvc-attach.yaml: {}
-    manager: {{ .Values.vault.name }}-mount-helper
   name: {{ .Values.vault.name }}-mount-helper
   namespace: {{ .Release.Namespace }}
 data:
