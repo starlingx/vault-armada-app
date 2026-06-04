@@ -1,0 +1,393 @@
+{{- if .Values.certReload.enabled }}
+#
+# Copyright (c) 2026 Wind River Systems, Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.vault.fullname }}-cert-reload
+  namespace: {{ .Release.Namespace }}
+data:
+  cert-reload.sh: |
+    #!/bin/bash
+    #
+    # Vault Certificate Reload CronJob Script
+    #
+    # Compares the certificate served by vault server pods against
+    # the certificate stored in the kubernetes secret.  If they differ,
+    # sends SIGHUP to the vault process to reload certificates from disk.
+    #
+
+    # Configurable from helm values
+    VAULT_NS={{ .Release.Namespace }}
+    VAULT_FN={{ .Values.vault.fullname }}
+    VAULT_NAME={{ .Values.vault.name }}
+    VAULT_PORT=8200
+    SIGHUP_DELAY={{ .Values.certReload.sighupDelay }}
+    VERIFY_RETRIES={{ .Values.certReload.verifyRetries }}
+    CONNECT_TIMEOUT={{ .Values.certReload.connectTimeout }}
+    SERVER_CERT_PATH={{ .Values.certReload.serverCertPath | quote }}
+    OVERRIDE_CA_FILE={{ .Values.certReload.caSecret | default "" | quote }}
+    if [ -n "$OVERRIDE_CA_FILE" ]; then
+        CA_FILE=/mnt/ca-override/ca.crt
+    else
+        CA_FILE=/mnt/certs/ca.crt
+    fi
+    CERT_FILE=/mnt/certs/tls.crt
+
+    # Selection of kubectl version
+    KUBECTL=kubectl
+    KUBECTL_HELM_OVERRIDE={{ .Values.manager.k8s.client_version }}
+    KUBE_VERSIONS="${KUBE_VERSIONS:-}"
+    KUBECTL_INSTALL_PATH="${KUBECTL_INSTALL_PATH:-/usr/local/bin}"
+
+    # Log levels
+    INFO=2
+    WARNING=3
+    ERROR=4
+
+    # Track overall job result
+    JOB_ERRORS=0
+
+    function log {
+        local lvl="$1"
+        local logStr
+        shift
+        case "$lvl" in
+            $INFO)    logStr="INFO" ;;
+            $WARNING) logStr="WARNING" ;;
+            $ERROR)   logStr="ERROR" ;;
+            *)        logStr="INFO" ;;
+        esac
+        echo "$(date +%Y-%m-%dT%H-%M-%S) $logStr $*"
+    }
+
+    # Reuse kubectl version selection from vault-manager
+    function compareK8sVersion {
+        local left="$1"
+        local right="$2"
+        left="${left#v}"
+        right="${right#v}"
+
+        if [ "$left" == "$right" ]; then
+            return 1
+        elif [ "${left%.*}" -gt "${right%.*}" ]; then
+            return 0
+        elif [ "${left%.*}" -lt "${right%.*}" ]; then
+            return 2
+        elif [ "${left#*.}" -gt "${right#*.}" ]; then
+            return 0
+        fi
+        return 2
+    }
+
+    function switchK8sVersion {
+        local select="$1"
+        local fname="kubectl.$select"
+        local newbin="${KUBECTL_INSTALL_PATH}/$fname"
+        which "$fname" >/dev/null 2>&1
+        if [ $? -ne 0 -o ! -f "$newbin" ]; then
+            return 1
+        fi
+        KUBECTL="$fname"
+        return 0
+    }
+
+    function pickK8sVersion {
+        local result serverver majorver minorver select majmin maxver minver
+        if [ -z "$KUBE_VERSIONS" ]; then
+            return
+        elif [ -n "$KUBECTL_HELM_OVERRIDE" ]; then
+            switchK8sVersion "$KUBECTL_HELM_OVERRIDE" && return
+        fi
+        result="$( $KUBECTL version -o json 2>/dev/null )"
+        if [ $? -ne 0 ]; then
+            return
+        fi
+        serverver="$( jq -r '.serverVersion.gitVersion' <<<"$result" \
+            | grep "[0-9]" )"
+        majorver="$( jq -r '.serverVersion.major' <<<"$result" \
+            | grep "[0-9]" )"
+        minorver="$( jq -r '.serverVersion.minor' <<<"$result" \
+            | grep "[0-9]" )"
+        if [ -z "$serverver" -o -z "$majorver" -o -z "$minorver" ]; then
+            return
+        fi
+        for select in $KUBE_VERSIONS noverhere; do
+            majmin="v${majorver}.${minorver}"
+            if [[ "$select" =~ ^$majmin ]]; then
+                break
+            fi
+        done
+        if [ "$select" == noverhere ]; then
+            maxver="$( awk '{print $1}' <<<"$KUBE_VERSIONS" )"
+            minver="$( awk '{print $NF}' <<<"$KUBE_VERSIONS" )"
+            compareK8sVersion ${serverver%.*} ${maxver%.*}
+            if [ "$?" -le 1 ]; then
+                select="$maxver"
+            else
+                compareK8sVersion ${minver%.*} ${serverver%.*}
+                if [ "$?" -le 1 ]; then
+                    select="$minver"
+                else
+                    return
+                fi
+            fi
+        fi
+        switchK8sVersion "${select%.*}"
+    }
+
+    # Get fingerprint of a certificate from file
+    function get_file_cert_fingerprint {
+        openssl x509 -in "$CERT_FILE" -noout \
+            -fingerprint -sha256 2>/dev/null \
+        | sed 's/.*=//'
+    }
+
+    # Get fingerprint of certificate served by a vault server at IP
+    function get_server_cert_fingerprint {
+        local ip="$1"
+        echo | timeout "$CONNECT_TIMEOUT" \
+            openssl s_client -connect "${ip}:${VAULT_PORT}" \
+            -CAfile "$CA_FILE" 2>/dev/null \
+            | openssl x509 -noout -fingerprint -sha256 2>/dev/null \
+            | sed 's/.*=//'
+    }
+
+    # Get fingerprint of cert file mounted inside a vault server pod
+    function get_pod_mounted_cert_fingerprint {
+        local pod="$1"
+        $KUBECTL exec -n "$VAULT_NS" "$pod" -- \
+            sh -c "cat $SERVER_CERT_PATH" 2>/dev/null \
+            | openssl x509 -noout -fingerprint -sha256 2>/dev/null \
+            | sed 's/.*=//'
+    }
+
+    # Send SIGHUP to vault process inside a pod
+    function send_sighup {
+        local pod="$1"
+        $KUBECTL exec -n "$VAULT_NS" "$pod" -- \
+            sh -c 'kill -s SIGHUP $(pgrep vault)' 2>/dev/null
+    }
+
+    # Get vault server pod names and IPs
+    function get_vault_pods {
+        local jpath
+
+        jpath='{range .items[*]}{.metadata.name}{" "}{.status.podIP}{"\n"}{end}'
+        $KUBECTL get pods -n "$VAULT_NS" \
+            -l component=server,app.kubernetes.io/name=${VAULT_NAME} \
+            -o jsonpath="$jpath" \
+            2>/dev/null | grep -v "^$"
+    }
+
+    #
+    # LOGIC
+    #
+    if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+        # This script was sourced
+        return 0
+    fi
+
+    #
+    # MAIN
+    #
+    pickK8sVersion
+    log $INFO "Starting ${VAULT_NAME} certificate reload check"
+
+    # Get the expected certificate fingerprint from our mounted secret
+    EXPECTED_FP="$(get_file_cert_fingerprint)"
+    if [ -z "$EXPECTED_FP" ]; then
+        log $ERROR "Failed to read certificate from mounted secret"
+        exit 1
+    fi
+    log $INFO "Expected certificate fingerprint: $EXPECTED_FP"
+
+    # Get vault server pods
+    PODS="$(get_vault_pods)"
+    if [ -z "$PODS" ]; then
+        log $WARNING "No ${VAULT_NAME} server pods found"
+        exit 0
+    fi
+
+    while read -r POD_NAME POD_IP; do
+        if [ -z "$POD_NAME" ] || [ -z "$POD_IP" ]; then
+            continue
+        fi
+        log $INFO "Processing pod: $POD_NAME ($POD_IP)"
+
+        # Step 1: Check if the pod's mounted cert matches ours
+        POD_MOUNTED_FP="$(get_pod_mounted_cert_fingerprint "$POD_NAME")"
+        if [ -z "$POD_MOUNTED_FP" ]; then
+            log $ERROR "Cannot read mounted cert from pod $POD_NAME"
+            # Cannot determine state; skip this pod
+            JOB_ERRORS=1
+            continue
+        fi
+
+        if [ "$POD_MOUNTED_FP" != "$EXPECTED_FP" ]; then
+            # Pod's mounted secret differs from cronjob's mounted secret
+            # This is a race condition - kubelet hasn't synced yet
+            log $ERROR "Pod $POD_NAME mounted cert ($POD_MOUNTED_FP)" \
+                "differs from cronjob cert ($EXPECTED_FP)." \
+                "Secret sync may be pending. Skipping."
+            JOB_ERRORS=1
+            continue
+        fi
+
+        # Step 2: Get the certificate the server is actually serving
+        SERVER_FP="$(get_server_cert_fingerprint "$POD_IP")"
+        if [ -z "$SERVER_FP" ]; then
+            log $ERROR "Failed to retrieve server certificate for pod" \
+                "$POD_NAME ($POD_IP)"
+            JOB_ERRORS=1
+            continue
+        fi
+
+        # Step 3: Compare server's live cert with expected
+        if [ "$SERVER_FP" == "$EXPECTED_FP" ]; then
+            log $INFO "Pod $POD_NAME certificate is current"
+            continue
+        fi
+
+        # Step 4: Send SIGHUP
+        log $INFO "Sending SIGHUP: Pod $POD_NAME serving stale cert" \
+            "($SERVER_FP)."
+        send_sighup "$POD_NAME"
+        if [ $? -ne 0 ]; then
+            log $ERROR "Failed to send SIGHUP to pod $POD_NAME"
+            JOB_ERRORS=1
+            continue
+        fi
+
+        # Step 5: Wait and verify that pod reloads the cert
+        RELOAD_SUCCESS=0
+        for attempt in $(seq 1 $VERIFY_RETRIES); do
+            sleep "$SIGHUP_DELAY"
+            NEW_FP="$(get_server_cert_fingerprint "$POD_IP")"
+            if [ "$NEW_FP" == "$EXPECTED_FP" ]; then
+                log $INFO "Pod $POD_NAME certificate reloaded" \
+                    "successfully (read attempt $attempt)"
+                RELOAD_SUCCESS=1
+                break
+            fi
+            log $INFO "Pod $POD_NAME cert not yet updated after" \
+                "$attempt * ${SIGHUP_DELAY}s"
+        done
+
+        if [ "$RELOAD_SUCCESS" -ne 1 ]; then
+            log $ERROR "Pod $POD_NAME failed to reload certificate" \
+                "after $VERIFY_RETRIES * ${SIGHUP_DELAY}s"
+            JOB_ERRORS=1
+        fi
+    done <<< "$PODS"
+
+    if [ "$JOB_ERRORS" -ne 0 ]; then
+        log $ERROR "Job completed with errors"
+        exit 1
+    fi
+
+    log $INFO "Job completed successfully"
+    exit 0
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.vault.fullname }}-cert-reload
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.vault.name }}-cert-reload
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.vault.fullname }}-cert-reload
+  namespace: {{ .Release.Namespace }}
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.vault.fullname }}-cert-reload
+  namespace: {{ .Release.Namespace }}
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.vault.fullname }}-cert-reload
+roleRef:
+  kind: Role
+  name: {{ .Values.vault.fullname }}-cert-reload
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Values.vault.fullname }}-cert-reload
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.vault.name }}-cert-reload
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  schedule: "{{ .Values.certReload.schedule }}"
+  successfulJobsHistoryLimit: {{ .Values.certReload.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.certReload.failedJobsHistoryLimit }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ .Values.certReload.activeDeadlineSeconds }}
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ .Values.vault.fullname }}-cert-reload
+          {{- if .Values.manager.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml .Values.manager.imagePullSecrets | nindent 12 }}
+          {{- end }}
+          {{- if .Values.manager.tolerations }}
+          tolerations:
+            {{- tpl .Values.manager.tolerations . | nindent 12 }}
+          {{- end }}
+          containers:
+          - name: cert-reload
+            image: "{{ .Values.manager.image.repository }}:{{ .Values.manager.image.tag }}"
+            imagePullPolicy: "{{ .Values.manager.image.pullPolicy }}"
+            command:
+            - bash
+            - /opt/script/cert-reload.sh
+            volumeMounts:
+            - name: cert-reload-script
+              mountPath: /opt/script
+              readOnly: true
+            - name: vault-server-tls
+              mountPath: /mnt/certs
+              readOnly: true
+            {{- if .Values.certReload.caSecret }}
+            - name: vault-ca-override
+              mountPath: /mnt/ca-override
+              readOnly: true
+            {{- end }}
+          volumes:
+          - name: cert-reload-script
+            configMap:
+              name: {{ .Values.vault.fullname }}-cert-reload
+          - name: vault-server-tls
+            secret:
+              secretName: {{ .Values.certReload.tlsSecret }}
+          {{- if .Values.certReload.caSecret }}
+          - name: vault-ca-override
+            secret:
+              secretName: {{ .Values.certReload.caSecret }}
+          {{- end }}
+{{- end }}
