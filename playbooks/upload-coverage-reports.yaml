@@ -1,0 +1,15 @@
+- hosts: all
+  tasks:
+    - name: Upload coverage reports
+      synchronize:
+        src: "{{ zuul.project.src_dir }}/python3-k8sapp-vault/k8sapp_vault/UTCoverage/"
+        dest: "{{ zuul.executor.log_root }}/coverage/"
+        mode: pull
+      failed_when: false
+    - name: Return coverage report artifact URL
+      zuul_return:
+        data:
+          zuul:
+            artifacts:
+              - name: "Coverage Report"
+                url: "coverage/htmlcov/index.html"
