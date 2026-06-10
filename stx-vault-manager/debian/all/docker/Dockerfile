@@ -8,8 +8,8 @@ USER root
 # Otherwise the latest minor releases are listed here:
 # https://kubernetes.io/releases/
 
-ENV KUBE_LATEST_VERSION="v1.34.3"
-ENV KUBE_VERSIONS="v1.34.3 v1.33.7 v1.32.11"
+ENV KUBE_LATEST_VERSION="v1.35.5"
+ENV KUBE_VERSIONS="v1.35.5 v1.34.8"
 ENV KUBECTL_DL_URL="https://dl.k8s.io/${KUBE_LATEST_VERSION}/bin/linux/amd64/kubectl"
 ENV KUBECTL_INSTALL_PATH="/usr/local/bin"
 
