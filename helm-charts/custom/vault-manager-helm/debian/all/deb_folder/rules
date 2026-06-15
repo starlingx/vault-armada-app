@@ -13,6 +13,11 @@ export APP_FOLDER = $(ROOT)/usr/lib/helm
 	dh $@
 
 override_dh_auto_build:
+	# Image tag substitution
+	$(eval OS_CODENAME := $(shell . /etc/os-release && echo $$VERSION_CODENAME))
+	find . -name 'values.yaml' -exec \
+            sed -i -e 's|@OS_CODENAME@|$(OS_CODENAME)|g' {} +
+
 	mkdir -p vault-manager
 	cp Chart.yaml values.yaml vault-manager
 	cp -r templates/ vault-manager

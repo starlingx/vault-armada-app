@@ -25,6 +25,11 @@ override_dh_auto_build:
 	mkdir -p $(STAGING)/charts
 	cp /usr/lib/helm/vault*.tgz $(STAGING)/charts
 
+	# Image tag substitution
+	$(eval OS_CODENAME := $(shell . /etc/os-release && echo $$VERSION_CODENAME))
+	find $(STAGING) -name '*.yaml' -exec \
+            sed -i -e 's|@OS_CODENAME@|$(OS_CODENAME)|g' {} +
+
 	# Adjust the helmrelease yamls based on the chart versions
 	for c in $(STAGING)/charts/*; do \
 		chart=$$(basename $$c .tgz); \
