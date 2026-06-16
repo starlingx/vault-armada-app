@@ -177,3 +177,42 @@ manager:
     # Number of seconds to wait from triggering the shutdown on the container,
     # and the forced stop of the container by the container runtime.
     terminationGracePeriodSeconds: 30
+
+# Certificate reload CronJob
+# Periodically checks if vault servers are serving the current
+# certificate from the TLS secret, and sends SIGHUP to reload if not.
+certReload:
+  # Enable or disable the certificate reload cronjob
+  enabled: true
+
+  # Cron schedule expression (default: daily at 3am)
+  schedule: "0 3 * * *"
+
+  # The kubernetes secret containing the vault server TLS certificate
+  tlsSecret: vault-server-tls
+
+  # Path to the TLS certificate file inside the vault server pod
+  serverCertPath: /vault/userconfig/vault-server-tls/tls.crt
+
+  # Optional: alternate secret for the CA certificate.
+  # If blank, the CA is read from the tlsSecret (ca.crt field).
+  caSecret: ""
+
+  # Seconds to wait after sending SIGHUP before verifying the
+  # certificate was reloaded
+  sighupDelay: 5
+
+  # Timeout in seconds for openssl s_client connection to vault server
+  connectTimeout: 10
+
+  # Maximum time in seconds for the entire job to complete
+  activeDeadlineSeconds: 300
+
+  # Number of times to retry verification after SIGHUP
+  verifyRetries: 3
+
+  # Number of successful job pods to retain
+  successfulJobsHistoryLimit: 1
+
+  # Number of failed job pods to retain
+  failedJobsHistoryLimit: 1
