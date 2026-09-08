@@ -222,7 +222,7 @@ test_get_server_cert_fingerprint_mock() {
     # Mock openssl s_client by overriding the function
     # to return cert A content
     get_server_cert_fingerprint() {
-        local ip="$1"
+        local host="$1"
         cat "$WORKDIR/a.crt" \
             | openssl x509 -noout -fingerprint -sha256 2>/dev/null \
             | sed 's/.*=//'
@@ -233,6 +233,40 @@ test_get_server_cert_fingerprint_mock() {
 
     # Restore original function
     source "$EXTRACTED"
+}
+
+# ---------------------------------------------------------------
+# Test: pod_ip_to_dns (IPv4 and IPv6 conversion)
+# ---------------------------------------------------------------
+test_pod_ip_to_dns_ipv4() {
+    local dns
+    dns=$(pod_ip_to_dns "192.168.1.1")
+    assert_eq "pod_ip_to_dns IPv4" \
+        "192-168-1-1.vault.pod.cluster.local" "$dns"
+}
+
+test_pod_ip_to_dns_ipv6_full() {
+    local dns
+    dns=$(pod_ip_to_dns "aaaa:bbbb:0:0:cccc:dddd:eeee:ffff")
+    assert_eq "pod_ip_to_dns IPv6 full" \
+        "aaaa-bbbb-0-0-cccc-dddd-eeee-ffff.vault.pod.cluster.local" "$dns"
+}
+
+test_pod_ip_to_dns_ipv6_compressed() {
+    # Compressed IPv6 form:
+    local dns
+    dns=$(pod_ip_to_dns "aaaa:bbbb::cccc:dddd:eeee:ffff")
+    assert_eq "pod_ip_to_dns IPv6 compressed" \
+        "aaaa-bbbb--cccc-dddd-eeee-ffff.vault.pod.cluster.local" "$dns"
+}
+
+test_pod_ip_to_dns_no_colon_ambiguity() {
+    # The resulting IPv6 host has no colons, so
+    # "${host}:${VAULT_PORT}" has exactly one colon (the port separator).
+    local dns colons
+    dns=$(pod_ip_to_dns "aaaa:bbbb::cccc:dddd:eeee:ffff")
+    colons=$(echo "${dns}:${VAULT_PORT}" | tr -cd ':' | wc -c)
+    assert_eq "pod_ip_to_dns connect string has single colon" "1" "$colons"
 }
 
 # ---------------------------------------------------------------
@@ -442,6 +476,10 @@ test_get_file_cert_fingerprint
 test_get_file_cert_fingerprint_different
 test_get_file_cert_fingerprint_missing_file
 test_get_server_cert_fingerprint_mock
+test_pod_ip_to_dns_ipv4
+test_pod_ip_to_dns_ipv6_full
+test_pod_ip_to_dns_ipv6_compressed
+test_pod_ip_to_dns_no_colon_ambiguity
 test_ca_file_default
 test_ca_file_override
 test_compareK8sVersion_equal

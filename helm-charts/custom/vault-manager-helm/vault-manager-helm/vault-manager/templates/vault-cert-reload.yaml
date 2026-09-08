@@ -26,6 +26,7 @@ data:
     VAULT_FN={{ .Values.vault.fullname }}
     VAULT_NAME={{ .Values.vault.name }}
     VAULT_PORT=8200
+    POD_DOMAIN="${VAULT_NS}.pod.cluster.local"
     SIGHUP_DELAY={{ .Values.certReload.sighupDelay }}
     VERIFY_RETRIES={{ .Values.certReload.verifyRetries }}
     CONNECT_TIMEOUT={{ .Values.certReload.connectTimeout }}
@@ -147,11 +148,22 @@ data:
         | sed 's/.*=//'
     }
 
-    # Get fingerprint of certificate served by a vault server at IP
-    function get_server_cert_fingerprint {
+    # Convert a pod IP (v4 or v6) to its kubernetes pod DNS name.
+    #   192.168.1.1             -> 192-168-1-1.<ns>.pod.cluster.local
+    #   aaaa:bbbb::cccc:dddd     -> aaaa-bbbb--cccc-dddd.<ns>.pod...
+    # Mirrors the conversion used by vault-manager init.sh getVaultPods.
+    function pod_ip_to_dns {
         local ip="$1"
+        local dashed
+        dashed="$( echo "$ip" | sed 's/[.:]/-/g' )"
+        echo "${dashed}.${POD_DOMAIN}"
+    }
+
+    # Get fingerprint of certificate served by a vault server at host
+    function get_server_cert_fingerprint {
+        local host="$1"
         echo | timeout "$CONNECT_TIMEOUT" \
-            openssl s_client -connect "${ip}:${VAULT_PORT}" \
+            openssl s_client -connect "${host}:${VAULT_PORT}" \
             -CAfile "$CA_FILE" 2>/dev/null \
             | openssl x509 -noout -fingerprint -sha256 2>/dev/null \
             | sed 's/.*=//'
@@ -217,7 +229,8 @@ data:
         if [ -z "$POD_NAME" ] || [ -z "$POD_IP" ]; then
             continue
         fi
-        log $INFO "Processing pod: $POD_NAME ($POD_IP)"
+        POD_DNS="$(pod_ip_to_dns "$POD_IP")"
+        log $INFO "Processing pod: $POD_NAME ($POD_IP -> $POD_DNS)"
 
         # Step 1: Check if the pod's mounted cert matches ours
         POD_MOUNTED_FP="$(get_pod_mounted_cert_fingerprint "$POD_NAME")"
@@ -239,7 +252,7 @@ data:
         fi
 
         # Step 2: Get the certificate the server is actually serving
-        SERVER_FP="$(get_server_cert_fingerprint "$POD_IP")"
+        SERVER_FP="$(get_server_cert_fingerprint "$POD_DNS")"
         if [ -z "$SERVER_FP" ]; then
             log $ERROR "Failed to retrieve server certificate for pod" \
                 "$POD_NAME ($POD_IP)"
@@ -267,7 +280,7 @@ data:
         RELOAD_SUCCESS=0
         for attempt in $(seq 1 $VERIFY_RETRIES); do
             sleep "$SIGHUP_DELAY"
-            NEW_FP="$(get_server_cert_fingerprint "$POD_IP")"
+            NEW_FP="$(get_server_cert_fingerprint "$POD_DNS")"
             if [ "$NEW_FP" == "$EXPECTED_FP" ]; then
                 log $INFO "Pod $POD_NAME certificate reloaded" \
                     "successfully (read attempt $attempt)"
