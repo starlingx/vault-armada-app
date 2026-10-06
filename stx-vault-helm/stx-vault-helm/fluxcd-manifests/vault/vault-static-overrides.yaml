@@ -27,10 +27,10 @@ injector:
     # registry is assumed when omitted:
     image:
       repository: hashicorp/vault
-      tag: 1.14.0
+      tag: 1.14.1
     # Set the vault yaml to refer to registry.local pulled as above
     repository: registry.local:9001/docker.io/hashicorp/vault
-    tag: 1.14.0
+    tag: 1.14.1
   tolerations: |
     - key: "node-role.kubernetes.io/master"
       operator: "Exists"
@@ -54,7 +54,7 @@ server:
           topologyKey: kubernetes.io/hostname
   image:
     repository: hashicorp/vault
-    tag: 1.14.0
+    tag: 1.14.1
   tolerations: |
     - key: "node-role.kubernetes.io/master"
       operator: "Exists"
@@ -103,4 +103,4 @@ csi:
   agent:
     image:
       repository: "hashicorp/vault"
-      tag: "1.14.0"
+      tag: "1.14.1"

@@ -23,7 +23,7 @@ index 58eb8a2..a0c69c7 100644
    agentImage:
 +    image:
 +      repository: "hashicorp/vault"
-+      tag: "1.14.0"
++      tag: "1.14.1"
      repository: "hashicorp/vault"
      tag: "1.14.0"
  
